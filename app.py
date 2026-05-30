@@ -15,13 +15,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# Style CSS pour colorer les lignes selon la criticité
-st.markdown("""
-    <style>
-    .reportview-container { background-color: #f5f7f9; }
-    </style>
-""", unsafe_allow_html=True)
-
 st.title("Analyse FFT Motoréducteur — Dashboard Industriel")
 
 # --------------------------------------------------
@@ -34,7 +27,7 @@ def calcul_fft(df):
     # 1. Suppression de la composante continue
     x = x - np.mean(x)
 
-    # 2. APPLICATION D'UNE FENÊTRE DE HANNING (Évite les fuites spectrales)
+    # 2. Application d'une fenêtre de Hanning (Évite les fuites spectrales)
     fenetre = np.hanning(len(x))
     x_fenetre = x * fenetre
 
@@ -87,7 +80,7 @@ def calcul_indicateurs(freq, amp):
     if Etotal > 0:
         IDM3 = (A1366**2 / Etotal) * H
 
-    # Détermination du statut de criticité de base pour le visuel
+    # Détermination du statut de criticité pour le visuel
     if IDM3 < 0.5:
         statut = "🟢 Bon"
     elif IDM3 < 1.5:
@@ -157,7 +150,6 @@ if uploaded_file:
         # ------------------------------------------
         st.subheader("📋 État de santé du parc de Motoréducteurs")
         
-        # Utilisation de colonnes Streamlit pour des KPI globaux
         moteurs_critiques = len(resultats[resultats["IDM3"] >= 1.5])
         
         col1, col2, col3 = st.columns(3)
@@ -190,8 +182,16 @@ if uploaded_file:
             title=f"Spectre FFT — {ensemble} (Zoom fenêtré 0-25 Hz)"
         )
         fig.update_xaxes(range=[0, 25])
-        # Ligne d'aide visuelle sur la zone cible (13.66 Hz)
-        fig.add_vrect(x0=13.21, x1=14.11, line_width=0, fillcolor="rgba(255, 0, 0, 0.1)", subtitle="Zone défaut (13.66 Hz)")
+        
+        # AJUSTEMENT ICI : Utilisation de annotation_text pour éviter le bug de version Plotly
+        fig.add_vrect(
+            x0=13.21, 
+            x1=14.11, 
+            line_width=0, 
+            fillcolor="rgba(255, 0, 0, 0.1)", 
+            annotation_text="Zone défaut (13.66 Hz)",
+            annotation_position="top left"
+        )
         
         st.plotly_chart(fig, use_container_width=True)
 
@@ -251,5 +251,4 @@ if uploaded_file:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 else:
-    # Message d'accueil si aucun fichier n'est chargé
     st.info("👋 Bienvenue ! Veuillez charger un fichier Excel contenant vos données vibratoires temporelles (colonnes 'ms' et 'V') dans le panneau latéral gauche pour démarrer l'analyse.")
