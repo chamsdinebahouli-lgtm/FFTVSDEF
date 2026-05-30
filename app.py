@@ -15,7 +15,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("Analyse FFT Motoréducteur — Suivi Harmonique 4X")
+st.title("Analyse FFT Motoréducteur — Tableau de Bord Expert")
 
 # --------------------------------------------------
 # FONCTION DE CALCUL CINÉMATIQUE
@@ -23,7 +23,7 @@ st.title("Analyse FFT Motoréducteur — Suivi Harmonique 4X")
 def calculer_frequences_theoriques(vitesse_moteur_rpm, micro_ajustement_hz):
     """
     Rapports stricts : Moteur -> Réducteur 1:246 -> Poulie 15d -> Courroie 126d -> Poulie 50d
-    + Ajout du suivi de l'harmonique 4X d'engrènement (autour de 3.675 Hz)
+    + Suivi de l'harmonique 4X d'engrènement
     """
     f_moteur = (vitesse_moteur_rpm / 60.0) + micro_ajustement_hz
     vitesse_moteur_corrigee_rpm = f_moteur * 60.0
@@ -34,14 +34,13 @@ def calculer_frequences_theoriques(vitesse_moteur_rpm, micro_ajustement_hz):
     f_poulie_50 = f_poulie_15 * (15.0 / 50.0)
     vitesse_sortie_rpm = f_poulie_50 * 60.0
     
-    # Calcul dynamique du 4ème harmonique d'engrènement
     f_engrenement_4x = f_engrenement * 4.0
     
     return {
         "Rotation Moteur": f_moteur,
         "Rotation Poulie 15d": f_poulie_15,
         "Engrènement (15d/50d)": f_engrenement,
-        "Harmonique Engrènement 4X": f_engrenement_4x,  # <-- Nouveau repère cible
+        "Harmonique Engrènement 4X": f_engrenement_4x,
         "Défilement Courroie": f_courroie,
         "Rotation Sortie (50d)": f_poulie_50
     }, vitesse_sortie_rpm, vitesse_moteur_corrigee_rpm
@@ -146,7 +145,13 @@ if st.sidebar.button("🔄 Réinitialiser le calage à 0 Hz"):
     st.session_state.micro_hz = 0.000
     st.rerun()
 
-notes_text = st.sidebar.text_area("📝 Scores de défaut réels (IA) :", value="ASM21A=2.44\nASM21B=2.74\nASM22A=1.67", height=80)
+st.sidebar.markdown("---")
+notes_text = st.sidebar.text_area(
+    "📝 Scores de défaut réels (Feedback Terrain) :", 
+    value="ASM21A=2.44\nASM21B=2.74\nASM22A=1.67", 
+    height=120,
+    help="Entrez ici les sévérités mesurées ou constatées pour corréler automatiquement vos indicateurs FFT."
+)
 
 # --------------------------------------------------
 # LOGIQUE PRINCIPALE
@@ -171,7 +176,7 @@ if uploaded_file:
             indic = calcul_indicateurs(freq, amp, f_cible_suivi)
             indic["Ensemble"] = feuille
             
-            # 2. KPIs par pièce (Inclusion automatique du nouveau repère)
+            # 2. KPIs par pièce
             for nom_elem, f_elem in freqs_meca.items():
                 tol = 0.01 if "Sortie" in nom_elem else 0.08
                 indic[f"Amp_{nom_elem}"] = amplitude_bande_max(freq, amp, f_elem, tolerance=tol)
@@ -187,9 +192,20 @@ if uploaded_file:
     if len(resultats) > 0:
         resultats = pd.DataFrame(resultats)
         
-        # AJOUT DE LA NOUVELLE COLONNE DANS LA SYNTHÈSE GLOBALE
+        # --- PARSING ET INTEGATION DU DEFAUT REEL ---
+        notes = {}
+        if notes_text:
+            for ligne in notes_text.splitlines():
+                if "=" in ligne:
+                    nom, valeur = ligne.split("=")
+                    try: notes[nom.strip()] = float(valeur.strip())
+                    except: pass
+        
+        resultats["Defaut_Réel"] = resultats["Ensemble"].map(notes)
+        
+        # Ordre des colonnes avec le Défaut Réel inséré juste après le Statut
         colonnes_affichage = [
-            "Ensemble", "Statut", "IDM3", "IDM_Modulation", 
+            "Ensemble", "Statut", "Defaut_Réel", "IDM3", "IDM_Modulation", 
             "Etotal", "Entropie", "E0_5", "E10_20",
             "Amp_Rotation Moteur", "Amp_Rotation Poulie 15d", 
             "Amp_Engrènement (15d/50d)", "Amp_Harmonique Engrènement 4X", 
@@ -198,8 +214,29 @@ if uploaded_file:
         
         resultats_triés = resultats.sort_values("IDM3", ascending=False)
 
-        # Affichage du Tableau de bord complet
+        # ------------------------------------------
+        # CALCULES ET AFFICHAGE DES CORRELATIONS DYNAMIQUES
+        # ------------------------------------------
         st.subheader("📋 État de santé exhaustif du parc de Motoréducteurs")
+        
+        df_valid_corr = resultats_triés.dropna(subset=["Defaut_Réel"])
+        
+        if len(df_valid_corr) >= 2:
+            # Calcul des corrélations de Pearson pour nos deux indicateurs clés
+            corr_idm3 = df_valid_corr["IDM3"].corr(df_valid_corr["Defaut_Réel"])
+            corr_mod = df_valid_corr["IDM_Modulation"].corr(df_valid_corr["Defaut_Réel"])
+            
+            # Affichage de bandeaux de métriques de performance au-dessus du tableau
+            c_c1, c_c2, c_c3 = st.columns(3)
+            c_c1.metric("📉 Corrélation IDM3 / Terrain", f"{corr_idm3:.3f}", 
+                        delta="Excellent" if corr_idm3 > 0.8 else "Modéré" if corr_idm3 > 0.5 else "Faible")
+            c_c2.metric("📉 Corrélation IDM Modulation / Terrain", f"{corr_mod:.3f}",
+                        delta="Excellent" if corr_mod > 0.8 else "Modéré" if corr_mod > 0.5 else "Faible")
+            c_c3.markdown("<div style='padding-top:10px; font-size:13px; color:#888;'><i>Note: Plus le coefficient est proche de 1.000, plus le modèle vibratoire prédit fidèlement la réalité mécanique.</i></div>", unsafe_allow_html=True)
+        else:
+            st.warning("⚠️ Renseignez au moins 2 machines valides dans 'Scores de défaut réels' (ex: ASM21A=2.44) pour débloquer l'analyse de corrélation.")
+
+        # Affichage du Tableau principal
         st.dataframe(resultats_triés[colonnes_affichage], use_container_width=True, hide_index=True)
 
         # ------------------------------------------
@@ -233,7 +270,7 @@ if uploaded_file:
         fft_df = pd.DataFrame({"Fréquence (Hz)": freq, "Amplitude": amp})
         ligne_machine = resultats[resultats["Ensemble"] == ensemble].iloc[0]
 
-        # AFFICHAGE DES 6 COMPTEURS (AVEC LE 4X DANS LA LISTE)
+        # Affichage des compteurs
         st.write("**Amplitudes lues aux repères actuels :**")
         cols_f = st.columns(6)
         noms_p = [
@@ -248,12 +285,11 @@ if uploaded_file:
         fig = px.line(fft_df, x="Fréquence (Hz)", y="Amplitude", title=f"Spectre FFT — {ensemble}")
         fig.update_xaxes(range=[0, 20])
         
-        # Attribution d'une couleur (Jaune / Gold) pour distinguer l'harmonique 4X des autres
         couleurs = {
             "Rotation Moteur": "#EF553B", 
             "Rotation Poulie 15d": "#00CC96", 
             "Engrènement (15d/50d)": "#AB63FA", 
-            "Harmonique Engrènement 4X": "#FFD700", # Gold / Jaune vif
+            "Harmonique Engrènement 4X": "#FFD700", 
             "Défilement Courroie": "#19D3F3", 
             "Rotation Sortie (50d)": "#FFA15A"
         }
@@ -267,39 +303,25 @@ if uploaded_file:
         # ------------------------------------------
         # APPRENTISSAGE IA
         # ------------------------------------------
-        if notes_text:
-            notes = {}
-            for ligne in notes_text.splitlines():
-                if "=" in ligne:
-                    nom, valeur = ligne.split("=")
-                    try: notes[nom.strip()] = float(valeur.strip())
-                    except: pass
+        modele_df = resultats_triés.dropna(subset=["Defaut_Réel"])
 
-            resultats_triés["Defaut_Réel"] = resultats_triés["Ensemble"].map(notes)
-            modele_df = resultats_triés.dropna(subset=["Defaut_Réel"])
+        if len(modele_df) >= 5:
+            st.markdown("---")
+            st.subheader("🤖 Apprentissage IA (Toutes Caractéristiques)")
+            
+            features = ["Amp Cible (Bande)", "Entropie", "E0_5", "E10_20", "IDM3", "IDM_Modulation"]
+            X = modele_df[features]
+            y = modele_df["Defaut_Réel"]
 
-            if len(modele_df) >= 5:
-                st.markdown("---")
-                st.subheader("🤖 Apprentissage IA (Toutes Caractéristiques)")
-                
-                features = ["Amp Cible (Bande)", "Entropie", "E0_5", "E10_20", "IDM3", "IDM_Modulation"]
-                X = modele_df[features]
-                y = modele_df["Defaut_Réel"]
+            model = RandomForestRegressor(n_estimators=300, random_state=42)
+            model.fit(X, y)
 
-                model = RandomForestRegressor(n_estimators=300, random_state=42)
-                model.fit(X, y)
+            resultats_triés["Prédiction IA"] = model.predict(resultats_triés[features])
 
-                resultats_triés["Prédiction IA"] = model.predict(resultats_triés[features])
-                corr = resultats_triés["IDM3"].corr(resultats_triés["Defaut_Réel"])
-
-                c1, c2 = st.columns([1, 3])
-                with c1:
-                    st.metric("Corrélation Globale", f"{corr:.3f}")
-                with c2:
-                    st.dataframe(
-                        resultats_triés[["Ensemble", "Defaut_Réel", "Prédiction IA", "IDM3", "IDM_Modulation"]].dropna(subset=["Defaut_Réel"]),
-                        hide_index=True, use_container_width=True
-                    )
+            st.dataframe(
+                resultats_triés[["Ensemble", "Defaut_Réel", "Prédiction IA", "IDM3", "IDM_Modulation"]].dropna(subset=["Defaut_Réel"]),
+                hide_index=True, use_container_width=True
+            )
 
         # ------------------------------------------
         # EXPORT TOTAL
