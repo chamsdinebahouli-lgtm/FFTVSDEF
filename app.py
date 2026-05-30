@@ -11,64 +11,67 @@ from io import BytesIO
 # CONFIGURATION & STYLE
 # --------------------------------------------------
 st.set_page_config(
-    page_title="Analyse FFT & Cinématique",
+    page_title="Analyse FFT & Cinématique Complète",
     layout="wide"
 )
 
-st.title("Analyse FFT Motoréducteur — Diagnostic Cinématique")
+st.title("Analyse FFT Motoréducteur — Chaîne Cinématique Complète")
 
 # --------------------------------------------------
-# FONCTION DE CALCUL CINÉMATIQUE
+# FONCTION DE CALCUL CINÉMATIQUE MISE À JOUR
 # --------------------------------------------------
-def calculer_frequences_theoriques(vitesse_poulie_15_rpm):
+def calculer_frequences_theoriques(vitesse_moteur_rpm):
     """
-    Calcule les fréquences de la chaîne cinématique basées sur la vitesse
-    de rotation de la petite poulie de 15 dents.
+    Calcule toutes les fréquences de la chaîne cinématique à partir de la vitesse moteur.
+    Configuration : Moteur -> Réducteur 1:246 -> Poulie 15d -> Courroie 126d -> Poulie 50d
     """
-    # 1. Fréquence de rotation de la petite poulie (Hz)
-    f_poulie_15 = vitesse_poulie_15_rpm / 60.0
+    # 1. Fréquence de rotation du moteur (Hz)
+    f_moteur = vitesse_moteur_rpm / 60.0
     
-    # 2. Fréquence d'engrènement de la poulie (choc des dents sur la courroie)
-    f_engrenement_poulie = f_poulie_15 * 15
+    # 2. Rotation en sortie de réducteur (Arbre poulie 15 dents)
+    f_poulie_15 = f_moteur / 246.0
     
-    # 3. Fréquence de défilement complet de la courroie (126 dents)
-    f_courroie = f_engrenement_poulie / 126
+    # 3. Fréquence d'engrènement des poulies (choc des dents)
+    f_engrenement = f_poulie_15 * 15.0
     
-    # 4. Fréquence de rotation du moteur en amont du réducteur (1:246)
-    f_moteur = f_poulie_15 * 246
+    # 4. Fréquence de défilement de la courroie (126 dents)
+    f_courroie = f_engrenement / 126.0
+    
+    # 5. Vitesse de rotation de la grande poulie finale (50 dents)
+    f_poulie_50 = f_poulie_15 * (15.0 / 50.0)
+    vitesse_sortie_rpm = f_poulie_50 * 60.0
     
     return {
+        "Rotation Moteur": f_moteur,
         "Rotation Poulie 15d": f_poulie_15,
-        "Engrènement 15d": f_engrenement_poulie,
+        "Engrènement (15d/50d)": f_engrenement,
         "Défilement Courroie": f_courroie,
-        "Rotation Moteur": f_moteur
-    }
+        "Rotation Sortie (50d)": f_poulie_50
+    }, vitesse_sortie_rpm
 
 # --------------------------------------------------
-# FONCTIONS FFT AMÉLIORÉES
+# FONCTIONS FFT 
 # --------------------------------------------------
 def calcul_fft(df):
     t = df["ms"].values / 1000.0
     x = df["V"].values.astype(float)
 
-    # Suppression de la composante continue
+    # Suppression composante continue
     x = x - np.mean(x)
 
-    # Application d'une fenêtre de Hanning (Évite les fuites spectrales)
+    # Fenêtre de Hanning
     fenetre = np.hanning(len(x))
     x_fenetre = x * fenetre
 
     dt = np.mean(np.diff(t))
     N = len(x)
 
-    # Calcul FFT avec correction du gain du fenêtrage
     fft = np.abs(rfft(x_fenetre)) * (2.0 / np.sum(fenetre))
     freq = rfftfreq(N, d=dt)
 
     return freq, fft
 
 def amplitude_bande_max(freq, amp, cible, tolerance=0.45):
-    """Cherche le pic maximum dans une bande autour de la cible (ex: 13.66 Hz)"""
     fmin = cible - tolerance
     fmax = cible + tolerance
     mask = (freq >= fmin) & (freq <= fmax)
@@ -95,7 +98,6 @@ def entropie_spectrale(amp):
     return float(-np.sum(p * np.log(p)))
 
 def calcul_indicateurs(freq, amp, cible_freq):
-    # Utilisation de la fréquence cible dynamique définie par l'utilisateur
     A_cible = amplitude_bande_max(freq, amp, cible_freq, tolerance=0.45)
     Etotal = energie_totale(amp)
     H = entropie_spectrale(amp)
@@ -124,7 +126,7 @@ def calcul_indicateurs(freq, amp, cible_freq):
     }
 
 # --------------------------------------------------
-# BARRE LATÉRALE (SIDEBAR) : CONFIGURATION
+# BARRE LATÉRALE (SIDEBAR)
 # --------------------------------------------------
 st.sidebar.header("🛠️ Configuration & Données")
 
@@ -134,33 +136,38 @@ uploaded_file = st.sidebar.file_uploader(
 )
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("⚙️ Paramètres Mécaniques")
+st.sidebar.subheader("⚙️ Analyse Cinématique")
 
-# Curseur pour ajuster la vitesse estimée de la poulie 15 dents
-vitesse_estimee_poulie = st.sidebar.slider(
-    "Vitesse de la poulie 15d (tr/min) :", 
-    min_value=5.0, max_value=120.0, value=54.64, step=0.05
+# L'utilisateur pilote la vitesse du moteur pour s'aligner sur la réalité
+vitesse_moteur_slider = st.sidebar.slider(
+    "Ajuster Vitesse Moteur (tr/min) :", 
+    min_value=400.0, max_value=2000.0, value=820.0, step=1.0
 )
 
-# Calcul dynamique des fréquences théoriques pour l'affichage
-freqs_meca = calculer_frequences_theoriques(vitesse_estimee_poulie)
-f_engrenement_defaut = freqs_meca["Engrènement 15d"]
+# Calcul des fréquences et de la vitesse de sortie induite
+freqs_meca, tr_min_sortie = calculer_frequences_theoriques(vitesse_moteur_slider)
+
+st.sidebar.metric("Vitesse calculée en sortie", f"{tr_min_sortie:.2f} tr/min")
+st.sidebar.caption("Objectif terrain : ~ 1.00 tr/min")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📝 Retour d'expérience Terrain")
 notes_text = st.sidebar.text_area(
     "Coller les scores de défaut réels :",
     value="ASM21A=2.44\nASM21B=2.74\nASM22A=1.67",
-    height=120
+    height=100
 )
 
 # --------------------------------------------------
-# LOGIQUE PRINCIPALE / TRAITEMENT
+# LOGIQUE PRINCIPALE
 # --------------------------------------------------
 if uploaded_file:
     xls = pd.ExcelFile(uploaded_file)
     resultats = []
     fft_data = {}
+
+    # La cible par défaut de l'IDM3 suit désormais la rotation moteur (ex: 13.66 Hz)
+    f_cible_suivi = freqs_meca["Rotation Moteur"]
 
     for feuille in xls.sheet_names:
         try:
@@ -169,8 +176,7 @@ if uploaded_file:
                 continue
 
             freq, amp = calcul_fft(df)
-            # On passe l'engrènement calculé comme fréquence cible pour l'IDM3
-            indic = calcul_indicateurs(freq, amp, f_engrenement_defaut)
+            indic = calcul_indicateurs(freq, amp, f_cible_suivi)
             indic["Ensemble"] = feuille
             
             resultats.append(indic)
@@ -184,36 +190,31 @@ if uploaded_file:
         resultats = resultats.sort_values("IDM3", ascending=False)
 
         # ------------------------------------------
-        # AFFICHAGE : SYNTHÈSE DU PARC
+        # TABLES & METRICS
         # ------------------------------------------
         st.subheader("📋 État de santé du parc de Motoréducteurs")
-        
         moteurs_critiques = len(resultats[resultats["IDM3"] >= 1.5])
         
         col1, col2, col3 = st.columns(3)
         col1.metric("Machines analysées", len(resultats))
         col2.metric("En Alarme 🔴", moteurs_critiques, delta=-moteurs_critiques, delta_color="inverse")
-        col3.metric("Fréquence Cible Suivie", f"{f_engrenement_defaut:.2f} Hz")
+        col3.metric("Fréquence Moteur Surveillée", f"{f_cible_suivi:.2f} Hz")
 
-        st.dataframe(
-            resultats[colonnes],
-            use_container_width=True,
-            hide_index=True
-        )
+        st.dataframe(resultats[colonnes], use_container_width=True, hide_index=True)
 
         # ------------------------------------------
-        # AFFICHAGE : FRÉQUENCES CALCULÉES
+        # GRAPHIQUE FFT INTERACTIF AVEC DIAGNOSTIC
         # ------------------------------------------
         st.markdown("---")
-        st.subheader("📊 Analyse Spectrale & Diagnostic de Panne")
+        st.subheader("📊 Analyse Spectrale Visuelle")
         
-        st.write("**Fréquences cinématiques calculées (Hz) correspondantes :**")
+        st.write("**Localisation spectrale des composants (Hz) :**")
         cols_f = st.columns(len(freqs_meca))
         for i, (nom, f_val) in enumerate(freqs_meca.items()):
-            cols_f[i].metric(nom, f"{f_val:.2f} Hz")
+            cols_f[i].metric(nom, f"{f_val:.3f} Hz")
 
         ensemble = st.selectbox(
-            "Sélectionner une machine pour visualiser son spectre FFT :",
+            "Sélectionner une machine :",
             resultats["Ensemble"]
         )
 
@@ -222,21 +223,21 @@ if uploaded_file:
 
         fig = px.line(
             fft_df, x="Fréquence (Hz)", y="Amplitude",
-            title=f"Spectre FFT — {ensemble} (Axe limité à 0-40 Hz pour observation)"
+            title=f"Spectre FFT — {ensemble}"
         )
-        fig.update_xaxes(range=[0, 40])
+        # On ajuste la vue automatique sur la zone intéressante (0-20 Hz)
+        fig.update_xaxes(range=[0, 20])
         
-        # Styles de couleurs distincts pour chaque élément mécanique
         couleurs = {
+            "Rotation Moteur": "#EF553B",        # Rouge
             "Rotation Poulie 15d": "#00CC96",    # Vert
-            "Engrènement 15d": "#EF553B",        # Rouge
-            "Défilement Courroie": "#AB63FA",    # Violet
-            "Rotation Moteur": "#19D3F3"          # Bleu ciel
+            "Engrènement (15d/50d)": "#AB63FA",  # Violet
+            "Défilement Courroie": "#19D3F3",    # Bleu
+            "Rotation Sortie (50d)": "#FFA15A"   # Orange
         }
         
-        # Tracer les lignes repères cinématiques sur la FFT
         for nom, f_val in freqs_meca.items():
-            if f_val <= 40:  # On ne l'affiche que si visible sur le graphique
+            if f_val <= 20:
                 fig.add_vline(
                     x=f_val, 
                     line_dash="dash", 
@@ -248,24 +249,22 @@ if uploaded_file:
         st.plotly_chart(fig, use_container_width=True)
 
         # ------------------------------------------
-        # COUCHE INTELLIGENCE ARTIFICIELLE
+        # COUCHE IA
         # ------------------------------------------
         if notes_text:
             notes = {}
             for ligne in notes_text.splitlines():
                 if "=" in ligne:
                     nom, valeur = ligne.split("=")
-                    try:
-                        notes[nom.strip()] = float(valeur.strip())
-                    except:
-                        pass
+                    try: notes[nom.strip()] = float(valeur.strip())
+                    except: pass
 
             resultats["Defaut_Réel"] = resultats["Ensemble"].map(notes)
             modele_df = resultats.dropna(subset=["Defaut_Réel"])
 
             if len(modele_df) >= 5:
                 st.markdown("---")
-                st.subheader("🤖 Module Prédictif Corrélation (Random Forest)")
+                st.subheader("🤖 Module IA Predictive")
                 
                 features = ["Amp Cible (Bande)", "Entropie", "E0_5", "E10_20", "IDM3"]
                 X = modele_df[features]
@@ -280,8 +279,6 @@ if uploaded_file:
                 c1, c2 = st.columns([1, 3])
                 with c1:
                     st.metric("Corrélation IDM3 / Terrain", f"{corr:.3f}")
-                    st.caption("Plus la corrélation est proche de 1.000, plus le curseur cinématique est sur la bonne vitesse réelle.")
-                
                 with c2:
                     st.dataframe(
                         resultats[["Ensemble", "Defaut_Réel", "Prédiction IA", "IDM3"]].dropna(subset=["Defaut_Réel"]),
@@ -289,18 +286,18 @@ if uploaded_file:
                     )
 
         # ------------------------------------------
-        # BOUTON D'EXPORTATION
+        # EXPORT
         # ------------------------------------------
         st.markdown("---")
         sortie = BytesIO()
         with pd.ExcelWriter(sortie, engine="openpyxl") as writer:
-            resultats.to_excel(writer, index=False, sheet_name="Synthese_Maintenance")
+            resultats.to_excel(writer, index=False, sheet_name="Synthese")
 
         st.download_button(
-            label="📥 Télécharger le rapport d'analyse (.xlsx)",
+            label="📥 Télécharger le rapport (.xlsx)",
             data=sortie.getvalue(),
-            file_name="Rapport_Analyse_Vibratoire.xlsx",
+            file_name="Rapport_Analyse.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 else:
-    st.info("👋 Prêt pour l'analyse. Chargez un fichier Excel (.xlsx) contenant vos colonnes 'ms' et 'V' depuis le volet de gauche.")
+    st.info("👋 Chargez votre fichier Excel pour corréler la cinématique et vos spectres vibratoires.")
