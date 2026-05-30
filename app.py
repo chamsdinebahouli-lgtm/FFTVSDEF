@@ -15,7 +15,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("Analyse FFT Motoréducteur — Seuils par Écart à la Droite de Corrélation")
+st.title("Analyse FFT Motoréducteur — Alignement État Cible B (3,32 Hz)")
 
 # --------------------------------------------------
 # FONCTION DE CALCUL CINÉMATIQUE
@@ -107,7 +107,7 @@ def calcul_indicateurs(freq, amp, cible_freq):
         "E0_5": E05,
         "E10_20": E1020,
         "IDM3": IDM3,
-        "Statut": "🔄 Calcul en cours..."  # Sera écrasé par la logique dynamique
+        "Statut": "🔄 Calcul en cours..."
     }
 
 # --------------------------------------------------
@@ -243,7 +243,6 @@ if uploaded_file:
                         else: statuts_dynamiques.append("🔴 Alarme (Fixe)")
                 resultats["Statut"] = statuts_dynamiques
             else:
-                # Fallback général par seuils fixes si moins de 3 points machines
                 resultats["Statut"] = resultats["IDM3"].apply(
                     lambda x: "🟢 Bon" if x < 3.5 else "🟡 À surveiller" if x < 4.5 else "🔴 Alarme"
                 )
@@ -270,7 +269,6 @@ if uploaded_file:
             )
         else:
             st.warning("⚠️ Renseignez au moins 2 machines valides pour projeter les indices de corrélation.")
-            # Remplissage par défaut des statuts si pas de données terrain du tout
             resultats["Statut"] = resultats["IDM3"].apply(
                 lambda x: "🟢 Bon" if x < 3.5 else "🟡 À surveiller" if x < 4.5 else "🔴 Alarme"
             )
@@ -340,6 +338,23 @@ if uploaded_file:
         st.plotly_chart(fig, use_container_width=True)
 
         # ------------------------------------------
+        # LEXIQUE ET DÉFINITIONS INTERACTIFS
+        # ------------------------------------------
+        with st.expander("💡 Aide à l'interprétation : À quoi correspondent les fréquences lues ?"):
+            st.markdown(f"""
+            Chaque ligne pointillée tracée automatiquement sur votre graphique Plotly correspond à une réalité physique :
+            
+            * **🔴 Rotation Moteur ({freqs_meca['Rotation Moteur']:.2f} Hz) :** Vitesse brute de l'arbre d'entrée. Un pic anormal traduit un **balourd** ou un **désalignement** mécanique direct.
+            * **🟢 Rotation Poulie 15d ({freqs_meca['Rotation Poulie 15d']:.3f} Hz) :** Cycle de l'arbre primaire intermédiaire.
+            * **🟣 Engrènement ({freqs_meca['Engrènement (15d/50d)']:.2f} Hz) :** Rythme normal de contact entre les dents.
+            * **🟡 Harmonique Engrènement 4X ({freqs_meca['Harmonique Engrènement 4X']:.2f} Hz) — ÉTAT CIBLE B :** Notre cible d'étude. Un dépassement fort confirme un **matage de denture** ou un désalignement critique sous forte charge.
+            * **🔵 Défilement Courroie ({freqs_meca['Défilement Courroie']:.3f} Hz) :** Fréquence propre de la courroie. Signale une hernie ou une fêlure localisée.
+            * **🟠 Rotation Sortie ({freqs_meca['Rotation Sortie (50d)']:.3f} Hz) :** Vitesse ultra-lente de l'axe entraînant votre convoyeur ou récepteur.
+            
+            ⚠️ **Note de diagnostic (Zone des 16 Hz) :** Si vous observez l'apparition d'énergie inhabituelle stable aux alentours de **16,00 Hz**, il ne s'agit pas d'un défaut d'engrènement classique, mais d'une **anomalie magnétique/électrique du moteur** (ex: défaut de barres de rotor) ou d'un **bruit de frottement à large bande** (perte d'huile, roulement endommagé).
+            """)
+
+        # ------------------------------------------
         # APPRENTISSAGE IA
         # ------------------------------------------
         modele_df = resultats_triés.dropna(subset=["Defaut_Réel"])
@@ -371,4 +386,4 @@ if uploaded_file:
             resultats_triés.to_excel(writer, index=False, sheet_name="Synthese_Totale")
         st.download_button(label="📥 Télécharger le registre complet (.xlsx)", data=sortie.getvalue(), file_name="Registre_Vibratoire_Total.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 else:
-    st.info("👋 Algorithme de seuillage dynamique et linéaire opérationnel. Chargez vos spectres vibratoires.")
+    st.info("👋 Interface configurée pour l'État Cible B (3,32 Hz) avec lexique et seuils dynamiques sigma prêts.")
