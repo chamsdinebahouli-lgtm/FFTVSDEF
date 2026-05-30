@@ -11,14 +11,14 @@ from io import BytesIO
 # CONFIGURATION & STYLE
 # --------------------------------------------------
 st.set_page_config(
-    page_title="Analyse FFT & Cinématique Complète",
+    page_title="Analyse FFT & Amplitudes Cinématiques",
     layout="wide"
 )
 
-st.title("Analyse FFT Motoréducteur — Chaîne Cinématique Complète")
+st.title("Analyse FFT Motoréducteur — Diagnostic et Suivi des Amplitudes")
 
 # --------------------------------------------------
-# FONCTION DE CALCUL CINÉMATIQUE MISE À JOUR
+# FONCTION DE CALCUL CINÉMATIQUE
 # --------------------------------------------------
 def calculer_frequences_theoriques(vitesse_moteur_rpm):
     """
@@ -72,6 +72,7 @@ def calcul_fft(df):
     return freq, fft
 
 def amplitude_bande_max(freq, amp, cible, tolerance=0.45):
+    """Extrait le pic d'amplitude max dans une zone de tolérance autour de la cible"""
     fmin = cible - tolerance
     fmax = cible + tolerance
     mask = (freq >= fmin) & (freq <= fmax)
@@ -138,7 +139,6 @@ uploaded_file = st.sidebar.file_uploader(
 st.sidebar.markdown("---")
 st.sidebar.subheader("⚙️ Analyse Cinématique")
 
-# L'utilisateur pilote la vitesse du moteur pour s'aligner sur la réalité
 vitesse_moteur_slider = st.sidebar.slider(
     "Ajuster Vitesse Moteur (tr/min) :", 
     min_value=400.0, max_value=2000.0, value=820.0, step=1.0
@@ -166,7 +166,6 @@ if uploaded_file:
     resultats = []
     fft_data = {}
 
-    # La cible par défaut de l'IDM3 suit désormais la rotation moteur (ex: 13.66 Hz)
     f_cible_suivi = freqs_meca["Rotation Moteur"]
 
     for feuille in xls.sheet_names:
@@ -179,6 +178,10 @@ if uploaded_file:
             indic = calcul_indicateurs(freq, amp, f_cible_suivi)
             indic["Ensemble"] = feuille
             
+            # AJOUT : On extrait aussi les amplitudes de TOUS les autres éléments pour le tableau final
+            for nom_elem, f_elem in freqs_meca.items():
+                indic[f"Amp_{nom_elem}"] = amplitude_bande_max(freq, amp, f_elem, tolerance=0.3)
+            
             resultats.append(indic)
             fft_data[feuille] = (freq, amp)
         except Exception as e:
@@ -186,46 +189,57 @@ if uploaded_file:
 
     if len(resultats) > 0:
         resultats = pd.DataFrame(resultats)
-        colonnes = ["Ensemble", "Statut", "IDM3", "Amp Cible (Bande)", "Etotal", "Entropie"]
-        resultats = resultats.sort_values("IDM3", ascending=False)
+        
+        # Sélection des colonnes pour la synthèse globale
+        colonnes_synthese = ["Ensemble", "Statut", "IDM3", "Amp Cible (Bande)", "Etotal"]
+        resultats_triés = resultats.sort_values("IDM3", ascending=False)
 
         # ------------------------------------------
         # TABLES & METRICS
         # ------------------------------------------
         st.subheader("📋 État de santé du parc de Motoréducteurs")
-        moteurs_critiques = len(resultats[resultats["IDM3"] >= 1.5])
+        moteurs_critiques = len(resultats_triés[resultats_triés["IDM3"] >= 1.5])
         
         col1, col2, col3 = st.columns(3)
-        col1.metric("Machines analysées", len(resultats))
+        col1.metric("Machines analysées", len(resultats_triés))
         col2.metric("En Alarme 🔴", moteurs_critiques, delta=-moteurs_critiques, delta_color="inverse")
         col3.metric("Fréquence Moteur Surveillée", f"{f_cible_suivi:.2f} Hz")
 
-        st.dataframe(resultats[colonnes], use_container_width=True, hide_index=True)
+        st.dataframe(resultats_triés[colonnes_synthese], use_container_width=True, hide_index=True)
 
         # ------------------------------------------
-        # GRAPHIQUE FFT INTERACTIF AVEC DIAGNOSTIC
+        # GRAPHIQUE FFT & EXTRACTION DES AMPLITUDES EN DIRECT
         # ------------------------------------------
         st.markdown("---")
-        st.subheader("📊 Analyse Spectrale Visuelle")
+        st.subheader("📊 Analyse Spectrale Visuelle & Amplitudes Trouvées")
         
-        st.write("**Localisation spectrale des composants (Hz) :**")
-        cols_f = st.columns(len(freqs_meca))
-        for i, (nom, f_val) in enumerate(freqs_meca.items()):
-            cols_f[i].metric(nom, f"{f_val:.3f} Hz")
-
         ensemble = st.selectbox(
-            "Sélectionner une machine :",
-            resultats["Ensemble"]
+            "Sélectionner une machine pour l'analyse par composant :",
+            resultats_triés["Ensemble"]
         )
 
         freq, amp = fft_data[ensemble]
         fft_df = pd.DataFrame({"Fréquence (Hz)": freq, "Amplitude": amp})
 
+        # RÉCUPÉRATION DES AMPLITUDES DE LA MACHINE SÉLECTIONNÉE
+        ligne_machine = resultats[resultats["Ensemble"] == ensemble].iloc[0]
+        
+        st.write(f"**Amplitudes physiques extraites sur {ensemble} (en Volts) :**")
+        cols_f = st.columns(len(freqs_meca))
+        
+        for i, (nom, f_val) in enumerate(freqs_meca.items()):
+            # On récupère la valeur d'amplitude calculée dans la boucle précédente
+            amp_extraite = ligne_machine[f"Amp_{nom}"]
+            cols_f[i].metric(
+                label=f"{nom} ({f_val:.2f} Hz)", 
+                value=f"{amp_extraite:.4f} V"
+            )
+
+        # Dessin du graphique Plotly
         fig = px.line(
             fft_df, x="Fréquence (Hz)", y="Amplitude",
             title=f"Spectre FFT — {ensemble}"
         )
-        # On ajuste la vue automatique sur la zone intéressante (0-20 Hz)
         fig.update_xaxes(range=[0, 20])
         
         couleurs = {
@@ -242,7 +256,7 @@ if uploaded_file:
                     x=f_val, 
                     line_dash="dash", 
                     line_color=couleurs[nom],
-                    annotation_text=nom, 
+                    annotation_text=f"{nom} ({ligne_machine[f'Amp_{nom}']:.3f}V)", 
                     annotation_position="top right"
                 )
         
@@ -259,8 +273,8 @@ if uploaded_file:
                     try: notes[nom.strip()] = float(valeur.strip())
                     except: pass
 
-            resultats["Defaut_Réel"] = resultats["Ensemble"].map(notes)
-            modele_df = resultats.dropna(subset=["Defaut_Réel"])
+            resultats_triés["Defaut_Réel"] = resultats_triés["Ensemble"].map(notes)
+            modele_df = resultats_triés.dropna(subset=["Defaut_Réel"])
 
             if len(modele_df) >= 5:
                 st.markdown("---")
@@ -273,31 +287,31 @@ if uploaded_file:
                 model = RandomForestRegressor(n_estimators=300, random_state=42)
                 model.fit(X, y)
 
-                resultats["Prédiction IA"] = model.predict(resultats[features])
-                corr = resultats["IDM3"].corr(resultats["Defaut_Réel"])
+                resultats_triés["Prédiction IA"] = model.predict(resultats_triés[features])
+                corr = resultats_triés["IDM3"].corr(resultats_triés["Defaut_Réel"])
 
                 c1, c2 = st.columns([1, 3])
                 with c1:
                     st.metric("Corrélation IDM3 / Terrain", f"{corr:.3f}")
                 with c2:
                     st.dataframe(
-                        resultats[["Ensemble", "Defaut_Réel", "Prédiction IA", "IDM3"]].dropna(subset=["Defaut_Réel"]),
+                        resultats_triés[["Ensemble", "Defaut_Réel", "Prédiction IA", "IDM3"]].dropna(subset=["Defaut_Réel"]),
                         hide_index=True, use_container_width=True
                     )
 
         # ------------------------------------------
-        # EXPORT
+        # EXPORT COMPLETE AVEC TOUTES LES AMPLITUDES
         # ------------------------------------------
         st.markdown("---")
         sortie = BytesIO()
         with pd.ExcelWriter(sortie, engine="openpyxl") as writer:
-            resultats.to_excel(writer, index=False, sheet_name="Synthese")
+            resultats_triés.to_excel(writer, index=False, sheet_name="Synthese_Complete")
 
         st.download_button(
-            label="📥 Télécharger le rapport (.xlsx)",
+            label="📥 Télécharger le rapport enrichi (.xlsx)",
             data=sortie.getvalue(),
-            file_name="Rapport_Analyse.xlsx",
+            file_name="Rapport_Diagnostic_Composants.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 else:
-    st.info("👋 Chargez votre fichier Excel pour corréler la cinématique et vos spectres vibratoires.")
+    st.info("👋 Chargez votre fichier Excel pour lister les amplitudes de chaque composant cinématique.")
