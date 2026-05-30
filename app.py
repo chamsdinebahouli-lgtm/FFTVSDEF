@@ -11,19 +11,19 @@ from io import BytesIO
 # CONFIGURATION & STYLE
 # --------------------------------------------------
 st.set_page_config(
-    page_title="Analyse FFT Expert",
+    page_title="Analyse FFT Expert — État Cible B",
     layout="wide"
 )
 
-st.title("Analyse FFT Motoréducteur — Corrélation Modulation Haute Précision")
+st.title("Analyse FFT Motoréducteur — Alignement État Cible B (3,32 Hz)")
 
 # --------------------------------------------------
 # FONCTION DE CALCUL CINÉMATIQUE
 # --------------------------------------------------
 def calculer_frequences_theoriques(vitesse_moteur_rpm, micro_ajustement_hz):
     """
-    Rapports stricts : Moteur -> Réducteur 1:246 -> Poulie 15d -> Courroie 126d -> Poulie 50d
-    + Suivi de l'harmonique 4X d'engrènement
+    Rapports stricts calés sur l'État Cible B :
+    Moteur -> Réducteur 1:246 -> Poulie 15d -> Courroie 126d -> Poulie 50d
     """
     f_moteur = (vitesse_moteur_rpm / 60.0) + micro_ajustement_hz
     vitesse_moteur_corrigee_rpm = f_moteur * 60.0
@@ -127,9 +127,10 @@ uploaded_file = st.sidebar.file_uploader("1. Importer le fichier Excel (.xlsx)",
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("⚙️ Vitesse Nominale")
+# Valeur par défaut ajustée à 817 tr/min pour cibler nativement l'état B
 vitesse_moteur_slider = st.sidebar.slider(
     "Vitesse Moteur théorique (tr/min) :", 
-    min_value=400.0, max_value=2000.0, value=820.0, step=1.0
+    min_value=400.0, max_value=2000.0, value=817.0, step=1.0
 )
 
 # Application de la correction
@@ -149,8 +150,7 @@ st.sidebar.markdown("---")
 notes_text = st.sidebar.text_area(
     "📝 Scores de défaut réels (Feedback Terrain) :", 
     value="ASM21A=2.44\nASM21B=2.74\nASM22A=1.67", 
-    height=120,
-    help="Entrez ici les sévérités constatées pour corréler automatiquement vos indicateurs avec le terrain."
+    height=120
 )
 
 # --------------------------------------------------
@@ -163,7 +163,6 @@ if uploaded_file:
 
     f_cible_suivi = freqs_meca["Rotation Moteur"]
 
-    # Traitement complet des données
     for feuille in xls.sheet_names:
         try:
             df = pd.read_excel(uploaded_file, sheet_name=feuille)
@@ -178,14 +177,14 @@ if uploaded_file:
             
             # 2. KPIs par pièce
             for nom_elem, f_elem in freqs_meca.items():
-                # Fenêtre serrée pour l'arbre de sortie très lent (0.016 Hz)
-                tol = 0.005 if "Sortie" in nom_elem else 0.08
+                # Tolérance ultra-serrée (0.003 Hz) pour isoler le 0.016 Hz du bruit continu à 0 Hz
+                tol = 0.003 if "Sortie" in nom_elem else 0.08
                 indic[f"Amp_{nom_elem}"] = amplitude_bande_max(freq, amp, f_elem, tolerance=tol)
             
-            # 3. Indicateurs croisés de modulation
+            # 3. Calculs des modulations
             indic["IDM_Modulation"] = indic["Amp_Rotation Moteur"] * indic["Amp_Rotation Sortie (50d)"]
             
-            # NOUVEL INDICATEUR PHYSIQUE CIBLE : Produit de l'arbre lent (~0.016Hz) et de l'H4X (~3.68Hz)
+            # Produit dynamique réaligné sur la cible actuelle
             indic["IDM_Modulation_4X"] = indic["Amp_Rotation Sortie (50d)"] * indic["Amp_Harmonique Engrènement 4X"]
             
             resultats.append(indic)
@@ -207,46 +206,44 @@ if uploaded_file:
         
         resultats["Defaut_Réel"] = resultats["Ensemble"].map(notes)
         
-        # Organisation du tableau d'affichage expert
         colonnes_affichage = [
             "Ensemble", "Statut", "Defaut_Réel", "IDM_Modulation_4X", "IDM3", "IDM_Modulation", 
             "Amp_Rotation Sortie (50d)", "Amp_Harmonique Engrènement 4X", "Amp_Rotation Moteur",
             "Amp_Engrènement (15d/50d)", "Amp_Rotation Poulie 15d", "Amp_Défilement Courroie"
         ]
         
-        # Tri initial par pertinence vis-à-vis de l'indicateur ciblé
         resultats_triés = resultats.sort_values("IDM_Modulation_4X", ascending=False)
 
         # ------------------------------------------
-        # INTERACTION & CORRÉLATION DE NOTRE NOUVEL INDICATEUR
+        # AFFICHAGE DES CORRÉLATIONS AJUSTÉES (ÉTAT B)
         # ------------------------------------------
-        st.subheader("📋 État de santé exhaustif du parc de Motoréducteurs")
+        st.subheader("📋 État de santé exhaustif (Cible : Vitesse sous charge - Harmonique à 3,32 Hz)")
         
         df_valid_corr = resultats_triés.dropna(subset=["Defaut_Réel"])
         
         if len(df_valid_corr) >= 2:
-            # Calcul des corrélations de Pearson avec les données terrain
             corr_mod4x = df_valid_corr["IDM_Modulation_4X"].corr(df_valid_corr["Defaut_Réel"])
             corr_mod = df_valid_corr["IDM_Modulation"].corr(df_valid_corr["Defaut_Réel"])
             
-            # Affichage des KPIs de corrélation
             c_c1, c_c2, c_c3 = st.columns(3)
             
-            # Remplacement par le KPI demandé : Corrélation de la modulation 4X (0.016Hz * 3.68Hz)
+            # Label du KPI dynamisé avec les valeurs cibles exactes lues en mémoire
+            f_sortie_label = freqs_meca["Rotation Sortie (50d)"]
+            f_h4x_label = freqs_meca["Harmonique Engrènement 4X"]
+            
             c_c1.metric(
-                label="📉 Corrélation Mod. 4X [0.016Hz × 3.68Hz] / Terrain", 
+                label=f"📉 Corrélation Mod. 4X [{f_sortie_label:.3f}Hz × {f_h4x_label:.2f}Hz] / Terrain", 
                 value=f"{corr_mod4x:.3f}", 
-                delta="Cible Validée" if corr_mod4x > 0.8 else "Modérée" if corr_mod4x > 0.5 else "Ajuster le calage"
+                delta="Alignement Optimal" if corr_mod4x > 0.8 else "Vérifier le calage"
             )
             c_c2.metric(
                 label="📉 Corrélation Mod. Moteur [Moteur × Sortie] / Terrain", 
                 value=f"{corr_mod:.3f}"
             )
-            c_c3.markdown("<div style='padding-top:10px; font-size:13px; color:#888;'><i>Note technique : Une corrélation élevée sur la Modulation 4X confirme un problème géométrique ou un défaut de denture cyclique sur l'arbre basse vitesse.</i></div>", unsafe_allow_html=True)
+            c_c3.markdown(f"<div style='padding-top:10px; font-size:13px; color:#888;'><i>Focus État B : Le repère surveille désormais le produit d'amplitude à la fréquence de rotation basse vitesse réelle.</i></div>", unsafe_allow_html=True)
         else:
-            st.warning("⚠️ Renseignez au moins 2 machines valides dans 'Scores de défaut réels' (ex: ASM21A=2.44) pour débloquer le calcul de corrélation dynamique.")
+            st.warning("⚠️ Renseignez au moins 2 machines valides dans les scores terrain pour projeter le coefficient de corrélation.")
 
-        # Affichage du Tableau de bord mis à jour
         st.dataframe(resultats_triés[colonnes_affichage], use_container_width=True, hide_index=True)
 
         # ------------------------------------------
@@ -275,12 +272,11 @@ if uploaded_file:
             st.session_state.micro_hz += 0.010
             st.rerun()
 
-        # Données spécifiques de la machine sélectionnée
+        # Données de la machine sélectionnée
         freq, amp = fft_data[ensemble]
         fft_df = pd.DataFrame({"Fréquence (Hz)": freq, "Amplitude": amp})
         ligne_machine = resultats[resultats["Ensemble"] == ensemble].iloc[0]
 
-        # Affichage des compteurs cinématiques
         st.write("**Amplitudes lues aux repères actuels :**")
         cols_f = st.columns(6)
         noms_p = [
@@ -296,12 +292,8 @@ if uploaded_file:
         fig.update_xaxes(range=[0, 20])
         
         couleurs = {
-            "Rotation Moteur": "#EF553B", 
-            "Rotation Poulie 15d": "#00CC96", 
-            "Engrènement (15d/50d)": "#AB63FA", 
-            "Harmonique Engrènement 4X": "#FFD700", 
-            "Défilement Courroie": "#19D3F3", 
-            "Rotation Sortie (50d)": "#FFA15A"
+            "Rotation Moteur": "#EF553B", "Rotation Poulie 15d": "#00CC96", "Engrènement (15d/50d)": "#AB63FA", 
+            "Harmonique Engrènement 4X": "#FFD700", "Défilement Courroie": "#19D3F3", "Rotation Sortie (50d)": "#FFA15A"
         }
         
         for nom, f_val in freqs_meca.items():
@@ -319,7 +311,6 @@ if uploaded_file:
             st.markdown("---")
             st.subheader("🤖 Apprentissage IA (Toutes Caractéristiques)")
             
-            # Intégration de la nouvelle feature de modulation fine dans l'entraînement du Random Forest
             features = ["Amp Cible (Bande)", "Entropie", "E0_5", "E10_20", "IDM3", "IDM_Modulation", "IDM_Modulation_4X"]
             X = modele_df[features]
             y = modele_df["Defaut_Réel"]
@@ -343,4 +334,4 @@ if uploaded_file:
             resultats_triés.to_excel(writer, index=False, sheet_name="Synthese_Totale")
         st.download_button(label="📥 Télécharger le registre complet (.xlsx)", data=sortie.getvalue(), file_name="Registre_Vibratoire_Total.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 else:
-    st.info("👋 Données prêtes pour l'évaluation de la corrélation par modulation 4X. Chargez votre fichier Excel.")
+    st.info("👋 Prêt pour l'analyse sur l'État Cible B. Chargez vos spectres vibratoires.")
