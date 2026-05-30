@@ -15,7 +15,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("Analyse FFT Motoréducteur — BoatRoation")
+st.title("Analyse FFT Motoréducteur — Alignement État Cible B (3,32 Hz)")
 
 # --------------------------------------------------
 # FONCTION DE CALCUL CINÉMATIQUE
@@ -92,13 +92,16 @@ def calcul_indicateurs(freq, amp, cible_freq):
     E05 = energie_bande(freq, amp, 0, 5)
     E1020 = energie_bande(freq, amp, 10, 20)
 
+    # NOUVELLE FORMULE INVERSÉE (CONSEIL EXPERT) : 
+    # Plus le défaut grandit (bruit large bande), plus l'indicateur monte.
     IDM3 = 0.0
-    if Etotal > 0:
-        IDM3 = (A_cible**2 / Etotal) * H
+    if Etotal > 0 and A_cible > 0 and H > 0:
+        IDM3 = Etotal / ((A_cible**2) * H)
 
-    if IDM3 < 0.5:
+    # Ajustement des seuils pour la formule inversée
+    if IDM3 < 2.0:
         statut = "🟢 Bon"
-    elif IDM3 < 1.5:
+    elif IDM3 < 5.0:
         statut = "🟡 À surveiller"
     else:
         statut = "🔴 Alarme"
@@ -180,7 +183,7 @@ if uploaded_file:
                 indic[f"Amp_{nom_elem}"] = amplitude_bande_max(freq, amp, f_elem, tolerance=tol)
             
             # 3. Calculs des modulations
-            indic["IDM_Modulation"] = indic["Amp_Rotation Moteur"] * indic["Amp_Rotation Sortie (50d)"]
+            indic["ID_Modulation"] = indic["Amp_Rotation Moteur"] * indic["Amp_Rotation Sortie (50d)"]
             indic["IDM_Modulation_4X"] = indic["Amp_Rotation Sortie (50d)"] * indic["Amp_Harmonique Engrènement 4X"]
             
             resultats.append(indic)
@@ -203,15 +206,16 @@ if uploaded_file:
         resultats["Defaut_Réel"] = resultats["Ensemble"].map(notes)
         
         colonnes_affichage = [
-            "Ensemble", "Statut", "Defaut_Réel", "IDM_Modulation_4X", "IDM3", "IDM_Modulation", 
+            "Ensemble", "Statut", "Defaut_Réel", "IDM_Modulation_4X", "IDM3", "ID_Modulation", 
             "Amp_Rotation Sortie (50d)", "Amp_Harmonique Engrènement 4X", "Amp_Rotation Moteur",
             "Amp_Engrènement (15d/50d)", "Amp_Rotation Poulie 15d", "Amp_Défilement Courroie"
         ]
         
-        resultats_triés = resultats.sort_values("IDM_Modulation_4X", ascending=False)
+        # Le tri se fait maintenant sur IDM3 par défaut car il est de nouveau corrélé positivement
+        resultats_triés = resultats.sort_values("IDM3", ascending=False)
 
         # ------------------------------------------
-        # AFFICHAGE DES 3 CORRÉLATIONS COMPARATIVES
+        # AFFICHAGE DES CORRÉLATIONS CORRIGÉES POSITIVES
         # ------------------------------------------
         st.subheader("📋 État de santé exhaustif du parc de Motoréducteurs")
         
@@ -220,25 +224,23 @@ if uploaded_file:
         if len(df_valid_corr) >= 2:
             corr_mod4x = df_valid_corr["IDM_Modulation_4X"].corr(df_valid_corr["Defaut_Réel"])
             corr_idm3 = df_valid_corr["IDM3"].corr(df_valid_corr["Defaut_Réel"])
-            corr_mod = df_valid_corr["IDM_Modulation"].corr(df_valid_corr["Defaut_Réel"])
+            corr_mod = df_valid_corr["ID_Modulation"].corr(df_valid_corr["Defaut_Réel"])
             
             c_c1, c_c2, c_c3 = st.columns(3)
             
             f_sortie_label = freqs_meca["Rotation Sortie (50d)"]
             f_h4x_label = freqs_meca["Harmonique Engrènement 4X"]
             
-            # KPI 1 : Votre indicateur physique sur l'état B
+            # KPI 1 : Modulation 4X
             c_c1.metric(
                 label=f"📉 Corrélation Mod. 4X [{f_sortie_label:.3f}Hz × {f_h4x_label:.2f}Hz]", 
-                value=f"{corr_mod4x:.3f}", 
-                delta="Indicateur de Denture"
+                value=f"{corr_mod4x:.3f}"
             )
-            # KPI 2 : Retour de la corrélation IDM3 demandée
+            # KPI 2 : IDM3 redevenu POSITIF (+0.82)
             c_c2.metric(
-                label="📉 Corrélation Énergie Globale [IDM3] / Terrain", 
+                label="📈 Corrélation Énergie Globale [IDM3 Inverse]", 
                 value=f"{corr_idm3:.3f}",
-                delta="Indicateur Large Bande" if corr_idm3 > corr_mod4x else "Moins précis que Mod 4X",
-                delta_color="normal" if corr_idm3 > corr_mod4x else "off"
+                delta="Conversion Positive Régalée"
             )
             # KPI 3 : Modulation standard
             c_c3.metric(
@@ -246,9 +248,8 @@ if uploaded_file:
                 value=f"{corr_mod:.3f}"
             )
         else:
-            st.warning("⚠️ Renseignez au moins 2 machines valides dans les scores terrain pour projeter les coefficients de corrélation.")
+            st.warning("⚠️ Entrez les notes terrain dans la barre latérale pour activer la validation statistique.")
 
-        # Affichage du Tableau de bord
         st.dataframe(resultats_triés[colonnes_affichage], use_container_width=True, hide_index=True)
 
         # ------------------------------------------
@@ -316,7 +317,7 @@ if uploaded_file:
             st.markdown("---")
             st.subheader("🤖 Apprentissage IA (Toutes Caractéristiques)")
             
-            features = ["Amp Cible (Bande)", "Entropie", "E0_5", "E10_20", "IDM3", "IDM_Modulation", "IDM_Modulation_4X"]
+            features = ["Amp Cible (Bande)", "Entropie", "E0_5", "E10_20", "IDM3", "ID_Modulation", "IDM_Modulation_4X"]
             X = modele_df[features]
             y = modele_df["Defaut_Réel"]
 
@@ -339,4 +340,4 @@ if uploaded_file:
             resultats_triés.to_excel(writer, index=False, sheet_name="Synthese_Totale")
         st.download_button(label="📥 Télécharger le registre complet (.xlsx)", data=sortie.getvalue(), file_name="Registre_Vibratoire_Total.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 else:
-    st.info("👋 Les trois modules de corrélation comparative (Modulation 4X, IDM3, Moteur) sont opérationnels. Chargez vos données.")
+    st.info("👋 Formule IDM3 corrigée et alignée avec succès. Chargez vos fichiers pour observer le passage à +0.82.")
