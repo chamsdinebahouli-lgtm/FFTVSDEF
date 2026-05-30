@@ -11,22 +11,26 @@ from io import BytesIO
 # CONFIGURATION & STYLE
 # --------------------------------------------------
 st.set_page_config(
-    page_title="Analyse FFT Spécialiste",
+    page_title="Analyse FFT Recalage Précis",
     layout="wide"
 )
 
-st.title("Analyse FFT Motoréducteur — Plateforme de Diagnostic Complète")
+st.title("Analyse FFT Motoréducteur — Ajustement et Recalage Cinématique")
 
 # --------------------------------------------------
-# FONCTION DE CALCUL CINÉMATIQUE 
+# FONCTION DE CALCUL CINÉMATIQUE AVEC MICRO-AJUSTEMENT
 # --------------------------------------------------
-def calculer_frequences_theoriques(vitesse_moteur_rpm):
+def calculer_frequences_theoriques(vitesse_moteur_rpm, micro_ajustement_hz):
     """
-    Calcule toutes les fréquences de la chaîne cinématique à partir de la vitesse moteur.
+    Calcule toutes les fréquences de la chaîne cinématique à partir de la vitesse moteur
+    et applique un micro-ajustement fin en Hz sur la fréquence moteur.
     Configuration : Moteur -> Réducteur 1:246 -> Poulie 15d -> Courroie 126d -> Poulie 50d
     """
-    # 1. Fréquence de rotation du moteur (Hz)
-    f_moteur = vitesse_moteur_rpm / 60.0
+    # 1. Fréquence de rotation du moteur (Hz) + Correction fine de l'opérateur
+    f_moteur = (vitesse_moteur_rpm / 60.0) + micro_ajustement_hz
+    
+    # Recalcul de la vitesse RPM réelle corrigée pour affichage
+    vitesse_moteur_corrigee_rpm = f_moteur * 60.0
     
     # 2. Rotation en sortie de réducteur (Arbre poulie 15 dents)
     f_poulie_15 = f_moteur / 246.0
@@ -47,7 +51,7 @@ def calculer_frequences_theoriques(vitesse_moteur_rpm):
         "Engrènement (15d/50d)": f_engrenement,
         "Défilement Courroie": f_courroie,
         "Rotation Sortie (50d)": f_poulie_50
-    }, vitesse_sortie_rpm
+    }, vitesse_sortie_rpm, vitesse_moteur_corrigee_rpm
 
 # --------------------------------------------------
 # FONCTIONS FFT 
@@ -56,10 +60,8 @@ def calcul_fft(df):
     t = df["ms"].values / 1000.0
     x = df["V"].values.astype(float)
 
-    # Suppression composante continue
     x = x - np.mean(x)
 
-    # Fenêtre de Hanning
     fenetre = np.hanning(len(x))
     x_fenetre = x * fenetre
 
@@ -71,7 +73,8 @@ def calcul_fft(df):
 
     return freq, fft
 
-def amplitude_bande_max(freq, amp, cible, tolerance=0.45):
+def amplitude_bande_max(freq, amp, cible, tolerance=0.2):
+    # Note : Tolérance réduite car le recalage manuel permet d'être beaucoup plus strict et précis !
     fmin = cible - tolerance
     fmax = cible + tolerance
     mask = (freq >= fmin) & (freq <= fmax)
@@ -81,6 +84,9 @@ def amplitude_bande_max(freq, amp, cible, tolerance=0.45):
     else:
         idx = np.argmin(np.abs(freq - cible))
         return float(amp[idx])
+
+def column_exists_and_numeric(df, col):
+    return col in df.columns
 
 def energie_totale(amp):
     return float(np.sum(amp**2))
@@ -98,7 +104,7 @@ def entropie_spectrale(amp):
     return float(-np.sum(p * np.log(p)))
 
 def calcul_indicateurs(freq, amp, cible_freq):
-    A_cible = amplitude_bande_max(freq, amp, cible_freq, tolerance=0.45)
+    A_cible = amplitude_bande_max(freq, amp, cible_freq, tolerance=0.2)
     Etotal = energie_totale(amp)
     H = entropie_spectrale(amp)
     E05 = energie_bande(freq, amp, 0, 5)
@@ -136,23 +142,35 @@ uploaded_file = st.sidebar.file_uploader(
 )
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("⚙️ Analyse Cinématique")
+st.sidebar.subheader("⚙️ Calage Cinématique Fin")
 
+# 1. Ajustement grossier (RPM)
 vitesse_moteur_slider = st.sidebar.slider(
-    "Ajuster Vitesse Moteur (tr/min) :", 
+    "1. Vitesse Moteur nominale (tr/min) :", 
     min_value=400.0, max_value=2000.0, value=820.0, step=1.0
 )
 
-freqs_meca, tr_min_sortie = calculer_frequences_theoriques(vitesse_moteur_slider)
+# 2. Curseur de recalage chirurgical (Hz) pour glisser sur le pic de la FFT
+micro_ajustement = st.sidebar.slider(
+    "2. Recalage micrométrique (Hz) :",
+    min_value=-1.00, max_value=1.00, value=0.00, step=0.01,
+    help="Faites glisser ce curseur très lentement pour aligner parfaitement les lignes repères sur vos pics réels."
+)
 
-st.sidebar.metric("Vitesse calculée en Sortie", f"{tr_min_sortie:.2f} tr/min")
+# Calcul des fréquences avec la correction de l'opérateur
+freqs_meca, tr_min_sortie, tr_min_moteur_reel = calculer_frequences_theoriques(vitesse_moteur_slider, micro_ajustement)
+
+# Affichage des vitesses réelles calculées après recalage
+st.sidebar.markdown("**Vitesses recalées :**")
+st.sidebar.metric("Moteur Réel", f"{tr_min_moteur_reel:.1f} tr/min")
+st.sidebar.metric("Sortie Réelle", f"{tr_min_sortie:.2f} tr/min")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📝 Retour d'expérience Terrain")
 notes_text = st.sidebar.text_area(
     "Coller les scores de défaut réels :",
     value="ASM21A=2.44\nASM21B=2.74\nASM22A=1.67",
-    height=100
+    height=80
 )
 
 # --------------------------------------------------
@@ -163,6 +181,7 @@ if uploaded_file:
     resultats = []
     fft_data = {}
 
+    # La cible suit précisément la fréquence moteur ajustée par l'opérateur
     f_cible_suivi = freqs_meca["Rotation Moteur"]
 
     for feuille in xls.sheet_names:
@@ -173,16 +192,15 @@ if uploaded_file:
 
             freq, amp = calcul_fft(df)
             
-            # 1. Calcul des indicateurs de base (IDM3, Entropie, Energies E0_5, E10_20)
+            # Calcul avec la nouvelle cible parfaitement recalée
             indic = calcul_indicateurs(freq, amp, f_cible_suivi)
             indic["Ensemble"] = feuille
             
-            # 2. Extraction des amplitudes physiques de chaque composant
+            # Extraction des amplitudes basées sur les positions recalées
             for nom_elem, f_elem in freqs_meca.items():
-                tol = 0.05 if "Sortie" in nom_elem else 0.3
+                tol = 0.02 if "Sortie" in nom_elem else 0.15  # Plus précis car lignes recalées
                 indic[f"Amp_{nom_elem}"] = amplitude_bande_max(freq, amp, f_elem, tolerance=tol)
             
-            # 3. Calcul du nouvel indicateur croisé (Modulation)
             indic["IDM_Modulation"] = indic["Amp_Rotation Moteur"] * indic["Amp_Rotation Sortie (50d)"]
             
             resultats.append(indic)
@@ -193,7 +211,6 @@ if uploaded_file:
     if len(resultats) > 0:
         resultats = pd.DataFrame(resultats)
         
-        # --- RÉINTÉGRATION DE TOUS LES INDICATEURS SANS EXCEPTION ---
         colonnes_affichage = [
             "Ensemble", "Statut", "IDM3", "IDM_Modulation", 
             "Etotal", "Entropie", "E0_5", "E10_20",
@@ -201,31 +218,30 @@ if uploaded_file:
             "Amp_Engrènement (15d/50d)", "Amp_Défilement Courroie", "Amp_Rotation Sortie (50d)"
         ]
         
-        # Tri principal par IDM3 (historique)
         resultats_triés = resultats.sort_values("IDM3", ascending=False)
 
         # ------------------------------------------
         # TABLES & METRICS GLOBALES
         # ------------------------------------------
-        st.subheader("📋 État de santé global du parc de Motoréducteurs")
+        st.subheader("📋 État de santé du parc (Fréquences Recalées)")
         
         moteurs_critiques = len(resultats_triés[resultats_triés["IDM3"] >= 1.5])
         col1, col2, col3 = st.columns(3)
         col1.metric("Machines analysées", len(resultats_triés))
-        col2.metric("En Alarme 🔴 (IDM3 >= 1.5)", moteurs_critiques, delta=-moteurs_critiques, delta_color="inverse")
-        col3.metric("Fréquence Moteur (Vitesse)", f"{f_cible_suivi:.2f} Hz")
+        col2.metric("En Alarme 🔴", moteurs_critiques, delta=-moteurs_critiques, delta_color="inverse")
+        col3.metric("Ligne Moteur Calée sur", f"{f_cible_suivi:.3f} Hz")
 
-        st.write("**Tableau de bord d'Analyse Vibratoire Exhaustif :**")
         st.dataframe(resultats_triés[colonnes_affichage], use_container_width=True, hide_index=True)
 
         # ------------------------------------------
         # FOCUS ET GRAPHIQUE FFT
         # ------------------------------------------
         st.markdown("---")
-        st.subheader("📊 Focus Spectre & Amplitudes par Composant")
+        st.subheader("📊 Ajustement Visuel des Lignes Cinématiques")
+        st.caption("💡 Astuce : Utilisez le curseur 'Recalage micrométrique' à gauche pour amener les lignes pointillés PILE sur les sommets de vos pics.")
         
         ensemble = st.selectbox(
-            "Sélectionner une machine pour isoler ses composants :",
+            "Sélectionner une machine pour ajuster le tir :",
             resultats_triés["Ensemble"]
         )
 
@@ -234,26 +250,25 @@ if uploaded_file:
 
         ligne_machine = resultats[resultats["Ensemble"] == ensemble].iloc[0]
         
-        # Rappel rapide des KPIs clés pour l'ensemble sélectionné
-        c_kpi1, c_kpi2, c_kpi3, c_kpi4 = st.columns(4)
-        c_kpi1.metric("Score Global IDM3", f"{ligne_machine['IDM3']:.3f}")
-        c_kpi2.metric("Indicateur Modulation", f"{ligne_machine['IDM_Modulation']:.5f}")
-        c_kpi3.metric("Énergie Bande Basse (E0_5)", f"{ligne_machine['E0_5']:.3f}")
-        c_kpi4.metric("Énergie Moteur (E10_20)", f"{ligne_machine['E10_20']:.3f}")
+        # Affichage des amplitudes lues au nouvel emplacement précis
+        st.write("**Amplitudes extraites précisément après recalage :**")
+        cols_f = st.columns(len(freqs_meca))
+        for i, (nom, f_val) in enumerate(freqs_meca.items()):
+            cols_f[i].metric(label=f"{nom} ({f_val:.3f} Hz)", value=f"{ligne_machine[f'Amp_{nom}']:.4f} V")
 
         # Graphique Plotly
         fig = px.line(
             fft_df, x="Fréquence (Hz)", y="Amplitude",
-            title=f"Spectre FFT — {ensemble}"
+            title=f"Spectre FFT — {ensemble} (Axe 0-20 Hz)"
         )
         fig.update_xaxes(range=[0, 20])
         
         couleurs = {
-            "Rotation Moteur": "#EF553B",        # Rouge
-            "Rotation Poulie 15d": "#00CC96",    # Vert
-            "Engrènement (15d/50d)": "#AB63FA",  # Violet
-            "Défilement Courroie": "#19D3F3",    # Bleu
-            "Rotation Sortie (50d)": "#FFA15A"   # Orange
+            "Rotation Moteur": "#EF553B",        
+            "Rotation Poulie 15d": "#00CC96",    
+            "Engrènement (15d/50d)": "#AB63FA",  
+            "Défilement Courroie": "#19D3F3",    
+            "Rotation Sortie (50d)": "#FFA15A"   
         }
         
         for nom, f_val in freqs_meca.items():
@@ -262,7 +277,7 @@ if uploaded_file:
                     x=f_val, 
                     line_dash="dash", 
                     line_color=couleurs[nom],
-                    annotation_text=f"{nom} ({ligne_machine[f'Amp_{nom}']:.3f}V)", 
+                    annotation_text=f"{nom}", 
                     annotation_position="top right"
                 )
         
@@ -284,9 +299,8 @@ if uploaded_file:
 
             if len(modele_df) >= 5:
                 st.markdown("---")
-                st.subheader("🤖 Apprentissage IA (Toutes Features Incluses)")
+                st.subheader("🤖 Apprentissage IA Corrigé")
                 
-                # L'IA apprend désormais de TOUS les indicateurs combinés
                 features = ["Amp Cible (Bande)", "Entropie", "E0_5", "E10_20", "IDM3", "IDM_Modulation"]
                 X = modele_df[features]
                 y = modele_df["Defaut_Réel"]
@@ -299,26 +313,26 @@ if uploaded_file:
 
                 c1, c2 = st.columns([1, 3])
                 with c1:
-                    st.metric("Corrélation Globale Apprentissage", f"{corr:.3f}")
+                    st.metric("Corrélation après alignement", f"{corr:.3f}")
                 with c2:
                     st.dataframe(
-                        resultats_triés[["Ensemble", "Defaut_Réel", "Prédiction IA", "IDM3", "IDM_Modulation"]].dropna(subset=["Defaut_Réel"]),
+                        resultats_triés[["Ensemble", "Defaut_Réel", "Prédiction IA", "IDM3"]].dropna(subset=["Defaut_Réel"]),
                         hide_index=True, use_container_width=True
                     )
 
         # ------------------------------------------
-        # EXPORT BANQUE DE DONNÉES COMPLETE (.XLSX)
+        # EXPORT
         # ------------------------------------------
         st.markdown("---")
         sortie = BytesIO()
         with pd.ExcelWriter(sortie, engine="openpyxl") as writer:
-            resultats_triés.to_excel(writer, index=False, sheet_name="Synthese_Totale_Maintenance")
+            resultats_triés.to_excel(writer, index=False, sheet_name="Synthese_Recalee")
 
         st.download_button(
-            label="📥 Télécharger la base de données de maintenance complète (.xlsx)",
+            label="📥 Télécharger le rapport recalé (.xlsx)",
             data=sortie.getvalue(),
-            file_name="Registre_Vibratoire_Total.xlsx",
+            file_name="Registre_Vibratoire_Ajuste.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 else:
-    st.info("👋 Toutes les métriques (historiques, par bande, par pièce et de modulation) sont prêtes. Chargez le fichier Excel pour peupler le tableau de bord.")
+    st.info("👋 Chargez le fichier Excel et utilisez le double système de curseurs cinématiques à gauche pour ajuster l'analyse.")
