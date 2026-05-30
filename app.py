@@ -15,7 +15,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("Analyse FFT Motoréducteur — Alignement État Cible B (3,32 Hz)")
+st.title("Analyse FFT Motoréducteur — BoatRoation")
 
 # --------------------------------------------------
 # FONCTION DE CALCUL CINÉMATIQUE
@@ -127,7 +127,6 @@ uploaded_file = st.sidebar.file_uploader("1. Importer le fichier Excel (.xlsx)",
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("⚙️ Vitesse Nominale")
-# Valeur par défaut ajustée à 817 tr/min pour cibler nativement l'état B
 vitesse_moteur_slider = st.sidebar.slider(
     "Vitesse Moteur théorique (tr/min) :", 
     min_value=400.0, max_value=2000.0, value=817.0, step=1.0
@@ -177,14 +176,11 @@ if uploaded_file:
             
             # 2. KPIs par pièce
             for nom_elem, f_elem in freqs_meca.items():
-                # Tolérance ultra-serrée (0.003 Hz) pour isoler le 0.016 Hz du bruit continu à 0 Hz
                 tol = 0.003 if "Sortie" in nom_elem else 0.08
                 indic[f"Amp_{nom_elem}"] = amplitude_bande_max(freq, amp, f_elem, tolerance=tol)
             
             # 3. Calculs des modulations
             indic["IDM_Modulation"] = indic["Amp_Rotation Moteur"] * indic["Amp_Rotation Sortie (50d)"]
-            
-            # Produit dynamique réaligné sur la cible actuelle
             indic["IDM_Modulation_4X"] = indic["Amp_Rotation Sortie (50d)"] * indic["Amp_Harmonique Engrènement 4X"]
             
             resultats.append(indic)
@@ -215,35 +211,44 @@ if uploaded_file:
         resultats_triés = resultats.sort_values("IDM_Modulation_4X", ascending=False)
 
         # ------------------------------------------
-        # AFFICHAGE DES CORRÉLATIONS AJUSTÉES (ÉTAT B)
+        # AFFICHAGE DES 3 CORRÉLATIONS COMPARATIVES
         # ------------------------------------------
-        st.subheader("📋 État de santé exhaustif (Cible : Vitesse sous charge - Harmonique à 3,32 Hz)")
+        st.subheader("📋 État de santé exhaustif du parc de Motoréducteurs")
         
         df_valid_corr = resultats_triés.dropna(subset=["Defaut_Réel"])
         
         if len(df_valid_corr) >= 2:
             corr_mod4x = df_valid_corr["IDM_Modulation_4X"].corr(df_valid_corr["Defaut_Réel"])
+            corr_idm3 = df_valid_corr["IDM3"].corr(df_valid_corr["Defaut_Réel"])
             corr_mod = df_valid_corr["IDM_Modulation"].corr(df_valid_corr["Defaut_Réel"])
             
             c_c1, c_c2, c_c3 = st.columns(3)
             
-            # Label du KPI dynamisé avec les valeurs cibles exactes lues en mémoire
             f_sortie_label = freqs_meca["Rotation Sortie (50d)"]
             f_h4x_label = freqs_meca["Harmonique Engrènement 4X"]
             
+            # KPI 1 : Votre indicateur physique sur l'état B
             c_c1.metric(
-                label=f"📉 Corrélation Mod. 4X [{f_sortie_label:.3f}Hz × {f_h4x_label:.2f}Hz] / Terrain", 
+                label=f"📉 Corrélation Mod. 4X [{f_sortie_label:.3f}Hz × {f_h4x_label:.2f}Hz]", 
                 value=f"{corr_mod4x:.3f}", 
-                delta="Alignement Optimal" if corr_mod4x > 0.8 else "Vérifier le calage"
+                delta="Indicateur de Denture"
             )
+            # KPI 2 : Retour de la corrélation IDM3 demandée
             c_c2.metric(
-                label="📉 Corrélation Mod. Moteur [Moteur × Sortie] / Terrain", 
+                label="📉 Corrélation Énergie Globale [IDM3] / Terrain", 
+                value=f"{corr_idm3:.3f}",
+                delta="Indicateur Large Bande" if corr_idm3 > corr_mod4x else "Moins précis que Mod 4X",
+                delta_color="normal" if corr_idm3 > corr_mod4x else "off"
+            )
+            # KPI 3 : Modulation standard
+            c_c3.metric(
+                label="📉 Corrélation Mod. Moteur [Moteur × Sortie]", 
                 value=f"{corr_mod:.3f}"
             )
-            c_c3.markdown(f"<div style='padding-top:10px; font-size:13px; color:#888;'><i>Focus État B : Le repère surveille désormais le produit d'amplitude à la fréquence de rotation basse vitesse réelle.</i></div>", unsafe_allow_html=True)
         else:
-            st.warning("⚠️ Renseignez au moins 2 machines valides dans les scores terrain pour projeter le coefficient de corrélation.")
+            st.warning("⚠️ Renseignez au moins 2 machines valides dans les scores terrain pour projeter les coefficients de corrélation.")
 
+        # Affichage du Tableau de bord
         st.dataframe(resultats_triés[colonnes_affichage], use_container_width=True, hide_index=True)
 
         # ------------------------------------------
@@ -334,4 +339,4 @@ if uploaded_file:
             resultats_triés.to_excel(writer, index=False, sheet_name="Synthese_Totale")
         st.download_button(label="📥 Télécharger le registre complet (.xlsx)", data=sortie.getvalue(), file_name="Registre_Vibratoire_Total.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 else:
-    st.info("👋 Prêt pour l'analyse sur l'État Cible B. Chargez vos spectres vibratoires.")
+    st.info("👋 Les trois modules de corrélation comparative (Modulation 4X, IDM3, Moteur) sont opérationnels. Chargez vos données.")
