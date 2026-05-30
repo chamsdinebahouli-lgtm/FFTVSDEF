@@ -11,11 +11,11 @@ from io import BytesIO
 # CONFIGURATION & STYLE
 # --------------------------------------------------
 st.set_page_config(
-    page_title="Analyse FFT Recalage Précis",
+    page_title="Analyse FFT Haute Précision",
     layout="wide"
 )
 
-st.title("Analyse FFT Motoréducteur — Ajustement et Recalage Cinématique")
+st.title("Analyse FFT Motoréducteur — Ajustement au Millième de Hz")
 
 # --------------------------------------------------
 # FONCTION DE CALCUL CINÉMATIQUE AVEC MICRO-AJUSTEMENT
@@ -23,13 +23,13 @@ st.title("Analyse FFT Motoréducteur — Ajustement et Recalage Cinématique")
 def calculer_frequences_theoriques(vitesse_moteur_rpm, micro_ajustement_hz):
     """
     Calcule toutes les fréquences de la chaîne cinématique à partir de la vitesse moteur
-    et applique un micro-ajustement fin en Hz sur la fréquence moteur.
+    et applique un micro-ajustement chirurgical au millième en Hz sur la fréquence moteur.
     Configuration : Moteur -> Réducteur 1:246 -> Poulie 15d -> Courroie 126d -> Poulie 50d
     """
-    # 1. Fréquence de rotation du moteur (Hz) + Correction fine de l'opérateur
+    # 1. Fréquence de rotation du moteur (Hz) + Correction ultra-fine
     f_moteur = (vitesse_moteur_rpm / 60.0) + micro_ajustement_hz
     
-    # Recalcul de la vitesse RPM réelle corrigée pour affichage
+    # Vitesse RPM réelle corrigée
     vitesse_moteur_corrigee_rpm = f_moteur * 60.0
     
     # 2. Rotation en sortie de réducteur (Arbre poulie 15 dents)
@@ -73,8 +73,8 @@ def calcul_fft(df):
 
     return freq, fft
 
-def amplitude_bande_max(freq, amp, cible, tolerance=0.2):
-    # Note : Tolérance réduite car le recalage manuel permet d'être beaucoup plus strict et précis !
+def amplitude_bande_max(freq, amp, cible, tolerance=0.1):
+    # Tolérance resserrée (0.1 Hz) car le recalage au millième permet de cibler le sommet parfait
     fmin = cible - tolerance
     fmax = cible + tolerance
     mask = (freq >= fmin) & (freq <= fmax)
@@ -84,9 +84,6 @@ def amplitude_bande_max(freq, amp, cible, tolerance=0.2):
     else:
         idx = np.argmin(np.abs(freq - cible))
         return float(amp[idx])
-
-def column_exists_and_numeric(df, col):
-    return col in df.columns
 
 def energie_totale(amp):
     return float(np.sum(amp**2))
@@ -104,7 +101,7 @@ def entropie_spectrale(amp):
     return float(-np.sum(p * np.log(p)))
 
 def calcul_indicateurs(freq, amp, cible_freq):
-    A_cible = amplitude_bande_max(freq, amp, cible_freq, tolerance=0.2)
+    A_cible = amplitude_bande_max(freq, amp, cible_freq, tolerance=0.1)
     Etotal = energie_totale(amp)
     H = entropie_spectrale(amp)
     E05 = energie_bande(freq, amp, 0, 5)
@@ -142,7 +139,7 @@ uploaded_file = st.sidebar.file_uploader(
 )
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("⚙️ Calage Cinématique Fin")
+st.sidebar.subheader("⚙️ Recalage au Millième (Hz)")
 
 # 1. Ajustement grossier (RPM)
 vitesse_moteur_slider = st.sidebar.slider(
@@ -150,20 +147,20 @@ vitesse_moteur_slider = st.sidebar.slider(
     min_value=400.0, max_value=2000.0, value=820.0, step=1.0
 )
 
-# 2. Curseur de recalage chirurgical (Hz) pour glisser sur le pic de la FFT
+# 2. Curseur micrométrique modifié : step=0.001 et format="%.3f" pour voir le millième
 micro_ajustement = st.sidebar.slider(
-    "2. Recalage micrométrique (Hz) :",
-    min_value=-1.00, max_value=1.00, value=0.00, step=0.01,
-    help="Faites glisser ce curseur très lentement pour aligner parfaitement les lignes repères sur vos pics réels."
+    "2. Ajustement chirurgical (Hz) :",
+    min_value=-2.000, max_value=2.000, value=0.000, step=0.001,
+    format="%.3f",
+    help="Utilisez les flèches du clavier après avoir cliqué sur le curseur pour ajuster au millième près (0.001 Hz)."
 )
 
-# Calcul des fréquences avec la correction de l'opérateur
+# Calcul des fréquences avec la correction ultra-précise
 freqs_meca, tr_min_sortie, tr_min_moteur_reel = calculer_frequences_theoriques(vitesse_moteur_slider, micro_ajustement)
 
-# Affichage des vitesses réelles calculées après recalage
-st.sidebar.markdown("**Vitesses recalées :**")
-st.sidebar.metric("Moteur Réel", f"{tr_min_moteur_reel:.1f} tr/min")
-st.sidebar.metric("Sortie Réelle", f"{tr_min_sortie:.2f} tr/min")
+st.sidebar.markdown("**Vitesses après correction :**")
+st.sidebar.metric("Moteur Corrigé", f"{tr_min_moteur_reel:.2f} tr/min")
+st.sidebar.metric("Sortie Corrigée", f"{tr_min_sortie:.3f} tr/min")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📝 Retour d'expérience Terrain")
@@ -181,7 +178,6 @@ if uploaded_file:
     resultats = []
     fft_data = {}
 
-    # La cible suit précisément la fréquence moteur ajustée par l'opérateur
     f_cible_suivi = freqs_meca["Rotation Moteur"]
 
     for feuille in xls.sheet_names:
@@ -192,13 +188,13 @@ if uploaded_file:
 
             freq, amp = calcul_fft(df)
             
-            # Calcul avec la nouvelle cible parfaitement recalée
+            # Calcul avec cible recalée au millième
             indic = calcul_indicateurs(freq, amp, f_cible_suivi)
             indic["Ensemble"] = feuille
             
-            # Extraction des amplitudes basées sur les positions recalées
+            # Extraction des amplitudes basées sur les positions chirurgicales
             for nom_elem, f_elem in freqs_meca.items():
-                tol = 0.02 if "Sortie" in nom_elem else 0.15  # Plus précis car lignes recalées
+                tol = 0.01 if "Sortie" in nom_elem else 0.08  # Fenêtre étroite grâce à la précision du calage
                 indic[f"Amp_{nom_elem}"] = amplitude_bande_max(freq, amp, f_elem, tolerance=tol)
             
             indic["IDM_Modulation"] = indic["Amp_Rotation Moteur"] * indic["Amp_Rotation Sortie (50d)"]
@@ -223,7 +219,7 @@ if uploaded_file:
         # ------------------------------------------
         # TABLES & METRICS GLOBALES
         # ------------------------------------------
-        st.subheader("📋 État de santé du parc (Fréquences Recalées)")
+        st.subheader("📋 État de santé du parc (Fréquences Recalées au Millième)")
         
         moteurs_critiques = len(resultats_triés[resultats_triés["IDM3"] >= 1.5])
         col1, col2, col3 = st.columns(3)
@@ -237,11 +233,11 @@ if uploaded_file:
         # FOCUS ET GRAPHIQUE FFT
         # ------------------------------------------
         st.markdown("---")
-        st.subheader("📊 Ajustement Visuel des Lignes Cinématiques")
-        st.caption("💡 Astuce : Utilisez le curseur 'Recalage micrométrique' à gauche pour amener les lignes pointillés PILE sur les sommets de vos pics.")
+        st.subheader("📊 Zoom & Calage Millimétrique des Composants")
+        st.caption("💡 **Astuce Pro :** Cliquez une fois sur le curseur numérique à gauche, puis utilisez les **flèches Gauche / Droite de votre clavier**. Cela permet de faire bouger les lignes de 0,001 Hz en 0,001 Hz pour viser le sommet parfait.")
         
         ensemble = st.selectbox(
-            "Sélectionner une machine pour ajuster le tir :",
+            "Sélectionner une machine pour aligner les spectres :",
             resultats_triés["Ensemble"]
         )
 
@@ -250,8 +246,8 @@ if uploaded_file:
 
         ligne_machine = resultats[resultats["Ensemble"] == ensemble].iloc[0]
         
-        # Affichage des amplitudes lues au nouvel emplacement précis
-        st.write("**Amplitudes extraites précisément après recalage :**")
+        # Affichage des amplitudes lues (au millième de Hz près)
+        st.write("**Amplitudes extraites au sommet des repères calculés :**")
         cols_f = st.columns(len(freqs_meca))
         for i, (nom, f_val) in enumerate(freqs_meca.items()):
             cols_f[i].metric(label=f"{nom} ({f_val:.3f} Hz)", value=f"{ligne_machine[f'Amp_{nom}']:.4f} V")
@@ -259,7 +255,7 @@ if uploaded_file:
         # Graphique Plotly
         fig = px.line(
             fft_df, x="Fréquence (Hz)", y="Amplitude",
-            title=f"Spectre FFT — {ensemble} (Axe 0-20 Hz)"
+            title=f"Spectre FFT Haute Résolution — {ensemble}"
         )
         fig.update_xaxes(range=[0, 20])
         
@@ -277,7 +273,7 @@ if uploaded_file:
                     x=f_val, 
                     line_dash="dash", 
                     line_color=couleurs[nom],
-                    annotation_text=f"{nom}", 
+                    annotation_text=f"{nom} ({f_val:.3f} Hz)", 
                     annotation_position="top right"
                 )
         
@@ -299,7 +295,7 @@ if uploaded_file:
 
             if len(modele_df) >= 5:
                 st.markdown("---")
-                st.subheader("🤖 Apprentissage IA Corrigé")
+                st.subheader("🤖 Apprentissage IA Optimisé (Fréquences Alignées)")
                 
                 features = ["Amp Cible (Bande)", "Entropie", "E0_5", "E10_20", "IDM3", "IDM_Modulation"]
                 X = modele_df[features]
@@ -313,7 +309,7 @@ if uploaded_file:
 
                 c1, c2 = st.columns([1, 3])
                 with c1:
-                    st.metric("Corrélation après alignement", f"{corr:.3f}")
+                    st.metric("Corrélation de Précision", f"{corr:.3f}")
                 with c2:
                     st.dataframe(
                         resultats_triés[["Ensemble", "Defaut_Réel", "Prédiction IA", "IDM3"]].dropna(subset=["Defaut_Réel"]),
@@ -326,13 +322,13 @@ if uploaded_file:
         st.markdown("---")
         sortie = BytesIO()
         with pd.ExcelWriter(sortie, engine="openpyxl") as writer:
-            resultats_triés.to_excel(writer, index=False, sheet_name="Synthese_Recalee")
+            resultats_triés.to_excel(writer, index=False, sheet_name="Synthese_Millieme")
 
         st.download_button(
-            label="📥 Télécharger le rapport recalé (.xlsx)",
+            label="📥 Télécharger le rapport haute précision (.xlsx)",
             data=sortie.getvalue(),
-            file_name="Registre_Vibratoire_Ajuste.xlsx",
+            file_name="Analyse_Vibratoire_Millieme.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 else:
-    st.info("👋 Chargez le fichier Excel et utilisez le double système de curseurs cinématiques à gauche pour ajuster l'analyse.")
+    st.info("👋 Prêt pour l'analyse au millième. Chargez votre fichier Excel.")
