@@ -15,7 +15,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("Analyse FFT Motoréducteur — Tableau de Bord Expert")
+st.title("Analyse FFT Motoréducteur — Suivi Harmonique 4X")
 
 # --------------------------------------------------
 # FONCTION DE CALCUL CINÉMATIQUE
@@ -23,6 +23,7 @@ st.title("Analyse FFT Motoréducteur — Tableau de Bord Expert")
 def calculer_frequences_theoriques(vitesse_moteur_rpm, micro_ajustement_hz):
     """
     Rapports stricts : Moteur -> Réducteur 1:246 -> Poulie 15d -> Courroie 126d -> Poulie 50d
+    + Ajout du suivi de l'harmonique 4X d'engrènement (autour de 3.675 Hz)
     """
     f_moteur = (vitesse_moteur_rpm / 60.0) + micro_ajustement_hz
     vitesse_moteur_corrigee_rpm = f_moteur * 60.0
@@ -33,10 +34,14 @@ def calculer_frequences_theoriques(vitesse_moteur_rpm, micro_ajustement_hz):
     f_poulie_50 = f_poulie_15 * (15.0 / 50.0)
     vitesse_sortie_rpm = f_poulie_50 * 60.0
     
+    # Calcul dynamique du 4ème harmonique d'engrènement
+    f_engrenement_4x = f_engrenement * 4.0
+    
     return {
         "Rotation Moteur": f_moteur,
         "Rotation Poulie 15d": f_poulie_15,
         "Engrènement (15d/50d)": f_engrenement,
+        "Harmonique Engrènement 4X": f_engrenement_4x,  # <-- Nouveau repère cible
         "Défilement Courroie": f_courroie,
         "Rotation Sortie (50d)": f_poulie_50
     }, vitesse_sortie_rpm, vitesse_moteur_corrigee_rpm
@@ -166,7 +171,7 @@ if uploaded_file:
             indic = calcul_indicateurs(freq, amp, f_cible_suivi)
             indic["Ensemble"] = feuille
             
-            # 2. KPIs par pièce (RÉINTÉGRATION TOTALE)
+            # 2. KPIs par pièce (Inclusion automatique du nouveau repère)
             for nom_elem, f_elem in freqs_meca.items():
                 tol = 0.01 if "Sortie" in nom_elem else 0.08
                 indic[f"Amp_{nom_elem}"] = amplitude_bande_max(freq, amp, f_elem, tolerance=tol)
@@ -182,12 +187,13 @@ if uploaded_file:
     if len(resultats) > 0:
         resultats = pd.DataFrame(resultats)
         
-        # RESTAURATION DE TOUTES LES COLONNES SANS EXCEPTION
+        # AJOUT DE LA NOUVELLE COLONNE DANS LA SYNTHÈSE GLOBALE
         colonnes_affichage = [
             "Ensemble", "Statut", "IDM3", "IDM_Modulation", 
             "Etotal", "Entropie", "E0_5", "E10_20",
             "Amp_Rotation Moteur", "Amp_Rotation Poulie 15d", 
-            "Amp_Engrènement (15d/50d)", "Amp_Défilement Courroie", "Amp_Rotation Sortie (50d)"
+            "Amp_Engrènement (15d/50d)", "Amp_Harmonique Engrènement 4X", 
+            "Amp_Défilement Courroie", "Amp_Rotation Sortie (50d)"
         ]
         
         resultats_triés = resultats.sort_values("IDM3", ascending=False)
@@ -197,14 +203,13 @@ if uploaded_file:
         st.dataframe(resultats_triés[colonnes_affichage], use_container_width=True, hide_index=True)
 
         # ------------------------------------------
-        # COUPE-CHIRURGICAL ET BOUTONS DE RECALAGE ULTRA-STABLES
+        # COMMANDES DE RECALAGE
         # ------------------------------------------
         st.markdown("---")
         st.subheader("📊 Calage Fin & Analyse du Spectre Vibratoire")
         
         ensemble = st.selectbox("Sélectionner une machine à analyser en détail :", resultats_triés["Ensemble"])
         
-        # Boutons de recalage millimétrique direct au-dessus du graphique
         st.write("**🕹️ Commandes de recalage instantané au millième de Hz :**")
         c_btn1, c_btn2, c_btn3, c_btn4, c_btn5 = st.columns([1, 1, 2, 1, 1])
         
@@ -215,7 +220,7 @@ if uploaded_file:
             st.session_state.micro_hz -= 0.001
             st.rerun()
         with c_btn3:
-            st.center = st.markdown(f"<h4 style='text-align: center; color: #19D3F3;'>Décalage : {st.session_state.micro_hz:+.3f} Hz</h4>", unsafe_allow_html=True)
+            st.markdown(f"<h4 style='text-align: center; color: #19D3F3;'>Décalage : {st.session_state.micro_hz:+.3f} Hz</h4>", unsafe_allow_html=True)
         if c_btn4.button("▶️ + 0.001 Hz"):
             st.session_state.micro_hz += 0.001
             st.rerun()
@@ -228,10 +233,14 @@ if uploaded_file:
         fft_df = pd.DataFrame({"Fréquence (Hz)": freq, "Amplitude": amp})
         ligne_machine = resultats[resultats["Ensemble"] == ensemble].iloc[0]
 
-        # Rappel des Amplitudes au-dessus du graphique
+        # AFFICHAGE DES 6 COMPTEURS (AVEC LE 4X DANS LA LISTE)
         st.write("**Amplitudes lues aux repères actuels :**")
-        cols_f = st.columns(5)
-        noms_p = ["Rotation Moteur", "Rotation Poulie 15d", "Engrènement (15d/50d)", "Défilement Courroie", "Rotation Sortie (50d)"]
+        cols_f = st.columns(6)
+        noms_p = [
+            "Rotation Moteur", "Rotation Poulie 15d", 
+            "Engrènement (15d/50d)", "Harmonique Engrènement 4X", 
+            "Défilement Courroie", "Rotation Sortie (50d)"
+        ]
         for idx, nom in enumerate(noms_p):
             cols_f[idx].metric(label=f"{nom} ({freqs_meca[nom]:.3f} Hz)", value=f"{ligne_machine[f'Amp_{nom}']:.4f} V")
 
@@ -239,7 +248,16 @@ if uploaded_file:
         fig = px.line(fft_df, x="Fréquence (Hz)", y="Amplitude", title=f"Spectre FFT — {ensemble}")
         fig.update_xaxes(range=[0, 20])
         
-        couleurs = {"Rotation Moteur": "#EF553B", "Rotation Poulie 15d": "#00CC96", "Engrènement (15d/50d)": "#AB63FA", "Défilement Courroie": "#19D3F3", "Rotation Sortie (50d)": "#FFA15A"}
+        # Attribution d'une couleur (Jaune / Gold) pour distinguer l'harmonique 4X des autres
+        couleurs = {
+            "Rotation Moteur": "#EF553B", 
+            "Rotation Poulie 15d": "#00CC96", 
+            "Engrènement (15d/50d)": "#AB63FA", 
+            "Harmonique Engrènement 4X": "#FFD700", # Gold / Jaune vif
+            "Défilement Courroie": "#19D3F3", 
+            "Rotation Sortie (50d)": "#FFA15A"
+        }
+        
         for nom, f_val in freqs_meca.items():
             if f_val <= 20:
                 fig.add_vline(x=f_val, line_dash="dash", line_color=couleurs[nom], annotation_text=nom)
