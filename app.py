@@ -128,7 +128,7 @@ def calcul_indicateurs(freq, amp, cible_freq):
     }
 
 # --------------------------------------------------
-# BARRE LATÉRALE (SIDEBAR)
+# BARRE LATÉRALE (SIDEBAR) - SYNCHRONISÉE SANS ERREUR
 # --------------------------------------------------
 st.sidebar.header("🛠️ Configuration & Données")
 
@@ -148,28 +148,42 @@ vitesse_moteur_slider = st.sidebar.slider(
 
 st.sidebar.markdown("**2. Recalage micrométrique (Hz) :**")
 
-# Système d'interconnexion intelligente Curseur / Boutons (+/-)
-# L'utilisation du st.session_state permet aux deux éléments de piloter la même valeur
+# Initialisation de la variable centrale si elle n'existe pas encore
 if "micro_hz" not in st.session_state:
     st.session_state.micro_hz = 0.000
 
-# Commande A : Boutons +/- numériques au millième (step=0.001)
+# Callbacks de synchronisation réciproque
+def update_depuis_input():
+    st.session_state.micro_hz = st.session_state.input_micro
+
+def update_depuis_slider():
+    st.session_state.micro_hz = st.session_state.slider_micro
+
+# Commande A : Boutons +/- numériques (Pas de 0.001 Hz)
 st.sidebar.number_input(
     "Ajuster par boutons (+/-) :",
-    min_value=-2.000, max_value=2.000, step=0.001,
+    min_value=-2.000,
+    max_value=2.000,
+    step=0.001,
     format="%.3f",
-    key="micro_hz"
+    key="input_micro",
+    value=st.session_state.micro_hz,
+    on_change=update_depuis_input
 )
 
-# Commande B : Curseur graphique associé
+# Commande B : Glissière graphique synchronisée
 st.sidebar.slider(
     "Ajuster par glissière :",
-    min_value=-2.000, max_value=2.000, step=0.001,
+    min_value=-2.000,
+    max_value=2.000,
+    step=0.001,
     format="%.3f",
-    key="micro_hz"
+    key="slider_micro",
+    value=st.session_state.micro_hz,
+    on_change=update_depuis_slider
 )
 
-# Récupération de la valeur synchronisée
+# Récupération de la valeur finale stabilisée
 micro_ajustement = st.session_state.micro_hz
 
 # Calcul des fréquences cinématiques basées sur cette valeur unique
