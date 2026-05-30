@@ -311,4 +311,14 @@ if uploaded_file:
         # ------------------------------------------
         st.markdown("---")
         sortie = BytesIO()
-        with pd.
+        with pd.ExcelWriter(sortie, engine="openpyxl") as writer:
+            resultats_triés.to_excel(writer, index=False, sheet_name="Synthese_Totale_Maintenance")
+
+        st.download_button(
+            label="📥 Télécharger la base de données de maintenance complète (.xlsx)",
+            data=sortie.getvalue(),
+            file_name="Registre_Vibratoire_Total.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+else:
+    st.info("👋 Toutes les métriques (historiques, par bande, par pièce et de modulation) sont prêtes. Chargez le fichier Excel pour peupler le tableau de bord.")
