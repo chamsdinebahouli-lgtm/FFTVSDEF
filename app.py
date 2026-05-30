@@ -11,20 +11,18 @@ from io import BytesIO
 # CONFIGURATION & STYLE
 # --------------------------------------------------
 st.set_page_config(
-    page_title="Analyse FFT Graphique Interactif",
+    page_title="Analyse FFT Expert",
     layout="wide"
 )
 
-st.title("Analyse FFT — Recalage par Clic Direct sur Graphique")
-st.markdown("### Cliquez directement sur le vrai pic moteur du graphique pour tout aligner")
+st.title("Analyse FFT Motoréducteur — Tableau de Bord Expert")
 
 # --------------------------------------------------
-# FONCTION DE CALCUL CINÉMATIQUE AVEC MICRO-AJUSTEMENT
+# FONCTION DE CALCUL CINÉMATIQUE
 # --------------------------------------------------
 def calculer_frequences_theoriques(vitesse_moteur_rpm, micro_ajustement_hz):
     """
-    Calcule toutes les fréquences cinématiques.
-    Configuration : Moteur -> Réducteur 1:246 -> Poulie 15d -> Courroie 126d -> Poulie 50d
+    Rapports stricts : Moteur -> Réducteur 1:246 -> Poulie 15d -> Courroie 126d -> Poulie 50d
     """
     f_moteur = (vitesse_moteur_rpm / 60.0) + micro_ajustement_hz
     vitesse_moteur_corrigee_rpm = f_moteur * 60.0
@@ -58,7 +56,7 @@ def calcul_fft(df):
     freq = rfftfreq(N, d=dt)
     return freq, fft
 
-def amplitude_bande_max(freq, amp, cible, tolerance=0.08):
+def amplitude_bande_max(freq, amp, cible, tolerance=0.1):
     fmin = cible - tolerance
     fmax = cible + tolerance
     mask = (freq >= fmin) & (freq <= fmax)
@@ -84,7 +82,7 @@ def entropie_spectrale(amp):
     return float(-np.sum(p * np.log(p)))
 
 def calcul_indicateurs(freq, amp, cible_freq):
-    A_cible = amplitude_bande_max(freq, amp, cible_freq, tolerance=0.08)
+    A_cible = amplitude_bande_max(freq, amp, cible_freq, tolerance=0.1)
     Etotal = energie_totale(amp)
     H = entropie_spectrale(amp)
     E05 = energie_bande(freq, amp, 0, 5)
@@ -112,7 +110,7 @@ def calcul_indicateurs(freq, amp, cible_freq):
     }
 
 # --------------------------------------------------
-# GESTION DES ÉTATS (SESSION STATE)
+# INITIALISATION DU SESSION STATE (MÉMOIRE)
 # --------------------------------------------------
 if "micro_hz" not in st.session_state:
     st.session_state.micro_hz = 0.000
@@ -121,35 +119,32 @@ if "micro_hz" not in st.session_state:
 # BARRE LATÉRALE
 # --------------------------------------------------
 st.sidebar.header("🛠️ Configuration")
-uploaded_file = st.sidebar.file_uploader("1. Fichier Excel (.xlsx)", type=["xlsx"])
+uploaded_file = st.sidebar.file_uploader("1. Importer le fichier Excel (.xlsx)", type=["xlsx"])
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("⚙️ Calage Nominal Initial")
+st.sidebar.subheader("⚙️ Vitesse Nominale")
 vitesse_moteur_slider = st.sidebar.slider(
     "Vitesse Moteur théorique (tr/min) :", 
     min_value=400.0, max_value=2000.0, value=820.0, step=1.0
 )
 
-# Bouton de réinitialisation du calage graphique
-if st.sidebar.button("🔄 Réinitialiser le recalage à 0 Hz"):
-    st.session_state.micro_hz = 0.000
-    st.rerun()
-
-# Calcul initial des fréquences théoriques pures (sans micro-ajustement) pour le calcul de décalage au clic
-f_moteur_theorique_pure = vitesse_moteur_slider / 60.0
-
-# Application du micro-ajustement actuel
+# Application de la correction
 freqs_meca, tr_min_sortie, tr_min_moteur_reel = calculer_frequences_theoriques(vitesse_moteur_slider, st.session_state.micro_hz)
 
 st.sidebar.markdown("---")
-st.sidebar.markdown(f"**Correction active :** `{st.session_state.micro_hz:+.3f} Hz`")
-st.sidebar.metric("Moteur Recalé", f"{tr_min_moteur_reel:.2f} tr/min")
-st.sidebar.metric("Sortie Recalée", f"{tr_min_sortie:.3f} tr/min")
+st.sidebar.subheader("📈 État du Calage")
+st.sidebar.metric("Correction active (Hz)", f"{st.session_state.micro_hz:+.3f} Hz")
+st.sidebar.metric("Moteur Réel Corrigé", f"{tr_min_moteur_reel:.2f} tr/min")
+st.sidebar.metric("Sortie Réelle Corrigée", f"{tr_min_sortie:.3f} tr/min")
 
-notes_text = st.sidebar.text_area("Scores de défaut réels :", value="ASM21A=2.44\nASM21B=2.74", height=60)
+if st.sidebar.button("🔄 Réinitialiser le calage à 0 Hz"):
+    st.session_state.micro_hz = 0.000
+    st.rerun()
+
+notes_text = st.sidebar.text_area("📝 Scores de défaut réels (IA) :", value="ASM21A=2.44\nASM21B=2.74\nASM22A=1.67", height=80)
 
 # --------------------------------------------------
-# LOGIQUE PRINCIPALE DYNAMIQUE
+# LOGIQUE PRINCIPALE
 # --------------------------------------------------
 if uploaded_file:
     xls = pd.ExcelFile(uploaded_file)
@@ -158,7 +153,7 @@ if uploaded_file:
 
     f_cible_suivi = freqs_meca["Rotation Moteur"]
 
-    # Traitement des feuilles avec prise en compte DYNAMIQUE des nouvelles fréquences ajustées
+    # Traitement complet des données
     for feuille in xls.sheet_names:
         try:
             df = pd.read_excel(uploaded_file, sheet_name=feuille)
@@ -166,89 +161,135 @@ if uploaded_file:
                 continue
 
             freq, amp = calcul_fft(df)
+            
+            # 1. KPIs Généraux
             indic = calcul_indicateurs(freq, amp, f_cible_suivi)
             indic["Ensemble"] = feuille
             
+            # 2. KPIs par pièce (RÉINTÉGRATION TOTALE)
             for nom_elem, f_elem in freqs_meca.items():
-                tol = 0.01 if "Sortie" in nom_elem else 0.05
+                tol = 0.01 if "Sortie" in nom_elem else 0.08
                 indic[f"Amp_{nom_elem}"] = amplitude_bande_max(freq, amp, f_elem, tolerance=tol)
             
-            # Recalcul dynamique immédiat de ton indicateur fétiche
+            # 3. Indicateur croisé
             indic["IDM_Modulation"] = indic["Amp_Rotation Moteur"] * indic["Amp_Rotation Sortie (50d)"]
             
             resultats.append(indic)
             fft_data[feuille] = (freq, amp)
         except Exception as e:
-            st.sidebar.error(f"Erreur : {e}")
+            st.sidebar.error(f"Erreur onglet {feuille} : {e}")
 
     if len(resultats) > 0:
         resultats = pd.DataFrame(resultats)
         
-        # 1. TABLEAU DE BORD EXHAUSTIF DYNAMIQUE
-        st.subheader("📋 Indicateurs mis à jour en temps réel")
+        # RESTAURATION DE TOUTES LES COLONNES SANS EXCEPTION
         colonnes_affichage = [
             "Ensemble", "Statut", "IDM3", "IDM_Modulation", 
-            "Amp_Rotation Moteur", "Amp_Rotation Sortie (50d)", "Etotal", "Entropie"
+            "Etotal", "Entropie", "E0_5", "E10_20",
+            "Amp_Rotation Moteur", "Amp_Rotation Poulie 15d", 
+            "Amp_Engrènement (15d/50d)", "Amp_Défilement Courroie", "Amp_Rotation Sortie (50d)"
         ]
+        
         resultats_triés = resultats.sort_values("IDM3", ascending=False)
+
+        # Affichage du Tableau de bord complet
+        st.subheader("📋 État de santé exhaustif du parc de Motoréducteurs")
         st.dataframe(resultats_triés[colonnes_affichage], use_container_width=True, hide_index=True)
 
         # ------------------------------------------
-        # GRAPHIC INTERACTIF BIDIRECTONNEL
+        # COUPE-CHIRURGICAL ET BOUTONS DE RECALAGE ULTRA-STABLES
         # ------------------------------------------
         st.markdown("---")
-        st.subheader("📊 Graphique de Calage Tactique")
-        st.info("🎯 **Mode d'emploi :** Regarde où se trouve le pic réel de ton moteur. **Clique une fois sur ce pic dans le graphique**. L'application va instantanément aspirer cette fréquence et caler toutes les lignes dessus !")
-
-        ensemble = st.selectbox("Sélectionner la machine à calibrer :", resultats_triés["Ensemble"])
+        st.subheader("📊 Calage Fin & Analyse du Spectre Vibratoire")
         
+        ensemble = st.selectbox("Sélectionner une machine à analyser en détail :", resultats_triés["Ensemble"])
+        
+        # Boutons de recalage millimétrique direct au-dessus du graphique
+        st.write("**🕹️ Commandes de recalage instantané au millième de Hz :**")
+        c_btn1, c_btn2, c_btn3, c_btn4, c_btn5 = st.columns([1, 1, 2, 1, 1])
+        
+        if c_btn1.button("⏪ - 0.010 Hz"):
+            st.session_state.micro_hz -= 0.010
+            st.rerun()
+        if c_btn2.button("◀️ - 0.001 Hz"):
+            st.session_state.micro_hz -= 0.001
+            st.rerun()
+        with c_btn3:
+            st.center = st.markdown(f"<h4 style='text-align: center; color: #19D3F3;'>Décalage : {st.session_state.micro_hz:+.3f} Hz</h4>", unsafe_allow_html=True)
+        if c_btn4.button("▶️ + 0.001 Hz"):
+            st.session_state.micro_hz += 0.001
+            st.rerun()
+        if c_btn5.button("⏩ + 0.010 Hz"):
+            st.session_state.micro_hz += 0.010
+            st.rerun()
+
+        # Données spécifiques de la machine sélectionnée
         freq, amp = fft_data[ensemble]
         fft_df = pd.DataFrame({"Fréquence (Hz)": freq, "Amplitude": amp})
         ligne_machine = resultats[resultats["Ensemble"] == ensemble].iloc[0]
 
-        # Création du graphique Plotly standard
+        # Rappel des Amplitudes au-dessus du graphique
+        st.write("**Amplitudes lues aux repères actuels :**")
+        cols_f = st.columns(5)
+        noms_p = ["Rotation Moteur", "Rotation Poulie 15d", "Engrènement (15d/50d)", "Défilement Courroie", "Rotation Sortie (50d)"]
+        for idx, nom in enumerate(noms_p):
+            cols_f[idx].metric(label=f"{nom} ({freqs_meca[nom]:.3f} Hz)", value=f"{ligne_machine[f'Amp_{nom}']:.4f} V")
+
+        # Trace du Graphique FFT
         fig = px.line(fft_df, x="Fréquence (Hz)", y="Amplitude", title=f"Spectre FFT — {ensemble}")
         fig.update_xaxes(range=[0, 20])
         
         couleurs = {"Rotation Moteur": "#EF553B", "Rotation Poulie 15d": "#00CC96", "Engrènement (15d/50d)": "#AB63FA", "Défilement Courroie": "#19D3F3", "Rotation Sortie (50d)": "#FFA15A"}
-        
         for nom, f_val in freqs_meca.items():
             if f_val <= 20:
-                fig.add_vline(x=f_val, line_dash="dash", line_color=couleurs[nom], annotation_text=f"{nom} ({f_val:.3f} Hz)")
-
-        # --- CAPTURE DU CLIC SUR LE GRAPHique (Magie Streamlit 1.30+) ---
-        # On active l'écoute des clics de souris sur les données du graphique
-        evenement_clic = st.plotly_chart(fig, use_container_width=True, on_select="rerun", selection_mode="points")
-
-        # Si l'utilisateur clique sur un point du graphique
-        if evenement_clic and "selection" in evenement_clic and "points" in evenement_clic["selection"]:
-            points = evenement_clic["selection"]["points"]
-            if len(points) > 0:
-                # On extrait la fréquence précise (l'axe X) là où l'opérateur a cliqué
-                frequence_cliquee = points[0]["x"]
-                
-                # Le but est de faire correspondre la Fréquence Moteur Théorique sur ce point cliqué.
-                # Calcul de la nouvelle correction (Micro-ajustement)
-                nouvelle_correction = frequence_cliquee - f_moteur_theorique_pure
-                
-                # Sauvegarde en mémoire et rechargement dynamique
-                st.session_state.micro_hz = float(nouvelle_correction)
-                st.toast(f"🎯 Calage réussi sur {frequence_cliquee:.3f} Hz ! Recalcul global en cours...", icon="🚀")
-                st.rerun()
-
-        # Affichage des résultats individuels raffinés sous le graphique
-        st.write("**Amplitudes lues après ton calage par clic :**")
-        cols_f = st.columns(len(freqs_meca))
-        for i, (nom, f_val) in enumerate(freqs_meca.items()):
-            cols_f[i].metric(label=f"{nom}", value=f"{ligne_machine[f'Amp_{nom}']:.4f} V")
+                fig.add_vline(x=f_val, line_dash="dash", line_color=couleurs[nom], annotation_text=nom)
+        
+        st.plotly_chart(fig, use_container_width=True)
 
         # ------------------------------------------
-        # EXPORT DATA
+        # APPRENTISSAGE IA
+        # ------------------------------------------
+        if notes_text:
+            notes = {}
+            for ligne in notes_text.splitlines():
+                if "=" in ligne:
+                    nom, valeur = ligne.split("=")
+                    try: notes[nom.strip()] = float(valeur.strip())
+                    except: pass
+
+            resultats_triés["Defaut_Réel"] = resultats_triés["Ensemble"].map(notes)
+            modele_df = resultats_triés.dropna(subset=["Defaut_Réel"])
+
+            if len(modele_df) >= 5:
+                st.markdown("---")
+                st.subheader("🤖 Apprentissage IA (Toutes Caractéristiques)")
+                
+                features = ["Amp Cible (Bande)", "Entropie", "E0_5", "E10_20", "IDM3", "IDM_Modulation"]
+                X = modele_df[features]
+                y = modele_df["Defaut_Réel"]
+
+                model = RandomForestRegressor(n_estimators=300, random_state=42)
+                model.fit(X, y)
+
+                resultats_triés["Prédiction IA"] = model.predict(resultats_triés[features])
+                corr = resultats_triés["IDM3"].corr(resultats_triés["Defaut_Réel"])
+
+                c1, c2 = st.columns([1, 3])
+                with c1:
+                    st.metric("Corrélation Globale", f"{corr:.3f}")
+                with c2:
+                    st.dataframe(
+                        resultats_triés[["Ensemble", "Defaut_Réel", "Prédiction IA", "IDM3", "IDM_Modulation"]].dropna(subset=["Defaut_Réel"]),
+                        hide_index=True, use_container_width=True
+                    )
+
+        # ------------------------------------------
+        # EXPORT TOTAL
         # ------------------------------------------
         st.markdown("---")
         sortie = BytesIO()
         with pd.ExcelWriter(sortie, engine="openpyxl") as writer:
-            resultats_triés.to_excel(writer, index=False, sheet_name="Synthese_Clic_Dynamique")
-        st.download_button(label="📥 Télécharger le rapport ajusté par clic (.xlsx)", data=sortie.getvalue(), file_name="Rapport_FFT_Clic_Dynamique.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            resultats_triés.to_excel(writer, index=False, sheet_name="Synthese_Totale")
+        st.download_button(label="📥 Télécharger le registre complet (.xlsx)", data=sortie.getvalue(), file_name="Registre_Vibratoire_Total.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 else:
-    st.info("👋 Importez votre fichier Excel. Vous pourrez ensuite cliquer sur le graphique pour ajuster instantanément les calculs.")
+    st.info("👋 Toutes les colonnes de diagnostic sont configurées. Chargez votre fichier Excel pour démarrer.")
