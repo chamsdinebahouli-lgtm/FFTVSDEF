@@ -11,14 +11,14 @@ from io import BytesIO
 # CONFIGURATION & STYLE
 # --------------------------------------------------
 st.set_page_config(
-    page_title="Analyse FFT & Amplitudes Cinématiques",
+    page_title="Analyse FFT & Indicateur Croisé",
     layout="wide"
 )
 
-st.title("Analyse FFT Motoréducteur — Diagnostic et Suivi des Amplitudes")
+st.title("Analyse FFT Motoréducteur — Indicateur de Modulation")
 
 # --------------------------------------------------
-# FONCTION DE CALCUL CINÉMATIQUE
+# FONCTION DE CALCUL CINÉMATIQUE 
 # --------------------------------------------------
 def calculer_frequences_theoriques(vitesse_moteur_rpm):
     """
@@ -72,7 +72,6 @@ def calcul_fft(df):
     return freq, fft
 
 def amplitude_bande_max(freq, amp, cible, tolerance=0.45):
-    """Extrait le pic d'amplitude max dans une zone de tolérance autour de la cible"""
     fmin = cible - tolerance
     fmax = cible + tolerance
     mask = (freq >= fmin) & (freq <= fmax)
@@ -144,11 +143,9 @@ vitesse_moteur_slider = st.sidebar.slider(
     min_value=400.0, max_value=2000.0, value=820.0, step=1.0
 )
 
-# Calcul des fréquences et de la vitesse de sortie induite
 freqs_meca, tr_min_sortie = calculer_frequences_theoriques(vitesse_moteur_slider)
 
-st.sidebar.metric("Vitesse calculée en sortie", f"{tr_min_sortie:.2f} tr/min")
-st.sidebar.caption("Objectif terrain : ~ 1.00 tr/min")
+st.sidebar.metric("Vitesse calculée en BAM (Sortie)", f"{tr_min_sortie:.2f} tr/min")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📝 Retour d'expérience Terrain")
@@ -178,9 +175,15 @@ if uploaded_file:
             indic = calcul_indicateurs(freq, amp, f_cible_suivi)
             indic["Ensemble"] = feuille
             
-            # AJOUT : On extrait aussi les amplitudes de TOUS les autres éléments pour le tableau final
+            # Extraction des amplitudes individuelles de la chaîne
             for nom_elem, f_elem in freqs_meca.items():
-                indic[f"Amp_{nom_elem}"] = amplitude_bande_max(freq, amp, f_elem, tolerance=0.3)
+                # Note : On réduit la tolérance à 0.15 pour la basse fréquence (sortie) pour éviter de capter le bruit continu
+                tol = 0.05 if "Sortie" in nom_elem else 0.3
+                indic[f"Amp_{nom_elem}"] = amplitude_bande_max(freq, amp, f_elem, tolerance=tol)
+            
+            # --- AJOUT DU NOUVEL INDICATEUR CROISÉ ---
+            # Multiplication Amplitude Moteur * Amplitude Sortie (1 tr/min)
+            indic["IDM_Modulation"] = indic["Amp_Rotation Moteur"] * indic["Amp_Rotation Sortie (50d)"]
             
             resultats.append(indic)
             fft_data[feuille] = (freq, amp)
@@ -190,52 +193,47 @@ if uploaded_file:
     if len(resultats) > 0:
         resultats = pd.DataFrame(resultats)
         
-        # Sélection des colonnes pour la synthèse globale
-        colonnes_synthese = ["Ensemble", "Statut", "IDM3", "Amp Cible (Bande)", "Etotal"]
-        resultats_triés = resultats.sort_values("IDM3", ascending=False)
+        # Intégration de l'IDM_Modulation dans le tableau principal de synthèse
+        colonnes_synthese = ["Ensemble", "Statut", "IDM3", "IDM_Modulation", "Amp_Rotation Moteur", "Amp_Rotation Sortie (50d)"]
+        # On trie ici par votre nouvel indicateur pour mettre en évidence les modulations suspectes
+        resultats_triés = resultats.sort_values("IDM_Modulation", ascending=False)
 
         # ------------------------------------------
         # TABLES & METRICS
         # ------------------------------------------
         st.subheader("📋 État de santé du parc de Motoréducteurs")
-        moteurs_critiques = len(resultats_triés[resultats_triés["IDM3"] >= 1.5])
         
         col1, col2, col3 = st.columns(3)
         col1.metric("Machines analysées", len(resultats_triés))
-        col2.metric("En Alarme 🔴", moteurs_critiques, delta=-moteurs_critiques, delta_color="inverse")
-        col3.metric("Fréquence Moteur Surveillée", f"{f_cible_suivi:.2f} Hz")
+        col2.metric("IDM_Modulation Max trouvé", f"{resultats_triés['IDM_Modulation'].max():.5f}")
+        col3.metric("Fréquence Moteur (Vitesse)", f"{f_cible_suivi:.2f} Hz")
 
+        st.write("**Classement par niveau d'Indicateur de Modulation (Moteur × Sortie) :**")
         st.dataframe(resultats_triés[colonnes_synthese], use_container_width=True, hide_index=True)
 
         # ------------------------------------------
-        # GRAPHIQUE FFT & EXTRACTION DES AMPLITUDES EN DIRECT
+        # GRAPHIQUE FFT & EXTRACTION DES AMPLITUDES
         # ------------------------------------------
         st.markdown("---")
-        st.subheader("📊 Analyse Spectrale Visuelle & Amplitudes Trouvées")
+        st.subheader("📊 Focus Spectre & Indicateurs par Composant")
         
         ensemble = st.selectbox(
-            "Sélectionner une machine pour l'analyse par composant :",
+            "Sélectionner une machine pour le détail :",
             resultats_triés["Ensemble"]
         )
 
         freq, amp = fft_data[ensemble]
         fft_df = pd.DataFrame({"Fréquence (Hz)": freq, "Amplitude": amp})
 
-        # RÉCUPÉRATION DES AMPLITUDES DE LA MACHINE SÉLECTIONNÉE
         ligne_machine = resultats[resultats["Ensemble"] == ensemble].iloc[0]
         
-        st.write(f"**Amplitudes physiques extraites sur {ensemble} (en Volts) :**")
-        cols_f = st.columns(len(freqs_meca))
-        
-        for i, (nom, f_val) in enumerate(freqs_meca.items()):
-            # On récupère la valeur d'amplitude calculée dans la boucle précédente
-            amp_extraite = ligne_machine[f"Amp_{nom}"]
-            cols_f[i].metric(
-                label=f"{nom} ({f_val:.2f} Hz)", 
-                value=f"{amp_extraite:.4f} V"
-            )
+        # Affichage des métriques de la machine sélectionnée
+        c_kpi1, c_kpi2, c_kpi3 = st.columns(3)
+        c_kpi1.metric("Amp. Moteur (A)", f"{ligne_machine['Amp_Rotation Moteur']:.4f} V")
+        c_kpi2.metric("Amp. Sortie ~1tr/min (B)", f"{ligne_machine['Amp_Rotation Sortie (50d)']:.4f} V")
+        c_kpi3.metric("Indicateur Croisé (A × B)", f"{ligne_machine['IDM_Modulation']:.5f}", delta="Modulation")
 
-        # Dessin du graphique Plotly
+        # Graphique Plotly
         fig = px.line(
             fft_df, x="Fréquence (Hz)", y="Amplitude",
             title=f"Spectre FFT — {ensemble}"
@@ -278,9 +276,10 @@ if uploaded_file:
 
             if len(modele_df) >= 5:
                 st.markdown("---")
-                st.subheader("🤖 Module IA Predictive")
+                st.subheader("🤖 Module IA Predictive (Random Forest)")
                 
-                features = ["Amp Cible (Bande)", "Entropie", "E0_5", "E10_20", "IDM3"]
+                # Ajout du nouvel indicateur croisé dans les features d'apprentissage de l'IA
+                features = ["Amp Cible (Bande)", "Entropie", "IDM3", "IDM_Modulation"]
                 X = modele_df[features]
                 y = modele_df["Defaut_Réel"]
 
@@ -288,30 +287,30 @@ if uploaded_file:
                 model.fit(X, y)
 
                 resultats_triés["Prédiction IA"] = model.predict(resultats_triés[features])
-                corr = resultats_triés["IDM3"].corr(resultats_triés["Defaut_Réel"])
+                corr = resultats_triés["IDM_Modulation"].corr(resultats_triés["Defaut_Réel"])
 
                 c1, c2 = st.columns([1, 3])
                 with c1:
-                    st.metric("Corrélation IDM3 / Terrain", f"{corr:.3f}")
+                    st.metric("Corrélation Nouvelle Variable / Terrain", f"{corr:.3f}")
                 with c2:
                     st.dataframe(
-                        resultats_triés[["Ensemble", "Defaut_Réel", "Prédiction IA", "IDM3"]].dropna(subset=["Defaut_Réel"]),
+                        resultats_triés[["Ensemble", "Defaut_Réel", "Prédiction IA", "IDM_Modulation", "IDM3"]].dropna(subset=["Defaut_Réel"]),
                         hide_index=True, use_container_width=True
                     )
 
         # ------------------------------------------
-        # EXPORT COMPLETE AVEC TOUTES LES AMPLITUDES
+        # EXPORT
         # ------------------------------------------
         st.markdown("---")
         sortie = BytesIO()
         with pd.ExcelWriter(sortie, engine="openpyxl") as writer:
-            resultats_triés.to_excel(writer, index=False, sheet_name="Synthese_Complete")
+            resultats_triés.to_excel(writer, index=False, sheet_name="Synthese_Modulation")
 
         st.download_button(
-            label="📥 Télécharger le rapport enrichi (.xlsx)",
+            label="📥 Télécharger le rapport (.xlsx)",
             data=sortie.getvalue(),
-            file_name="Rapport_Diagnostic_Composants.xlsx",
+            file_name="Rapport_Modulation_Vibratoire.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 else:
-    st.info("👋 Chargez votre fichier Excel pour lister les amplitudes de chaque composant cinématique.")
+    st.info("👋 En attente de votre fichier Excel pour calculer l'indicateur croisé (Moteur × Sortie).")
