@@ -11,11 +11,11 @@ from io import BytesIO
 # CONFIGURATION & STYLE
 # --------------------------------------------------
 st.set_page_config(
-    page_title="Analyse FFT & Indicateur Croisé",
+    page_title="Analyse FFT Spécialiste",
     layout="wide"
 )
 
-st.title("Analyse FFT Motoréducteur — Indicateur de Modulation")
+st.title("Analyse FFT Motoréducteur — Plateforme de Diagnostic Complète")
 
 # --------------------------------------------------
 # FONCTION DE CALCUL CINÉMATIQUE 
@@ -145,7 +145,7 @@ vitesse_moteur_slider = st.sidebar.slider(
 
 freqs_meca, tr_min_sortie = calculer_frequences_theoriques(vitesse_moteur_slider)
 
-st.sidebar.metric("Vitesse calculée en BAM (Sortie)", f"{tr_min_sortie:.2f} tr/min")
+st.sidebar.metric("Vitesse calculée en Sortie", f"{tr_min_sortie:.2f} tr/min")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📝 Retour d'expérience Terrain")
@@ -172,17 +172,17 @@ if uploaded_file:
                 continue
 
             freq, amp = calcul_fft(df)
+            
+            # 1. Calcul des indicateurs de base (IDM3, Entropie, Energies E0_5, E10_20)
             indic = calcul_indicateurs(freq, amp, f_cible_suivi)
             indic["Ensemble"] = feuille
             
-            # Extraction des amplitudes individuelles de la chaîne
+            # 2. Extraction des amplitudes physiques de chaque composant
             for nom_elem, f_elem in freqs_meca.items():
-                # Note : On réduit la tolérance à 0.15 pour la basse fréquence (sortie) pour éviter de capter le bruit continu
                 tol = 0.05 if "Sortie" in nom_elem else 0.3
                 indic[f"Amp_{nom_elem}"] = amplitude_bande_max(freq, amp, f_elem, tolerance=tol)
             
-            # --- AJOUT DU NOUVEL INDICATEUR CROISÉ ---
-            # Multiplication Amplitude Moteur * Amplitude Sortie (1 tr/min)
+            # 3. Calcul du nouvel indicateur croisé (Modulation)
             indic["IDM_Modulation"] = indic["Amp_Rotation Moteur"] * indic["Amp_Rotation Sortie (50d)"]
             
             resultats.append(indic)
@@ -193,32 +193,39 @@ if uploaded_file:
     if len(resultats) > 0:
         resultats = pd.DataFrame(resultats)
         
-        # Intégration de l'IDM_Modulation dans le tableau principal de synthèse
-        colonnes_synthese = ["Ensemble", "Statut", "IDM3", "IDM_Modulation", "Amp_Rotation Moteur", "Amp_Rotation Sortie (50d)"]
-        # On trie ici par votre nouvel indicateur pour mettre en évidence les modulations suspectes
-        resultats_triés = resultats.sort_values("IDM_Modulation", ascending=False)
+        # --- RÉINTÉGRATION DE TOUS LES INDICATEURS SANS EXCEPTION ---
+        colonnes_affichage = [
+            "Ensemble", "Statut", "IDM3", "IDM_Modulation", 
+            "Etotal", "Entropie", "E0_5", "E10_20",
+            "Amp_Rotation Moteur", "Amp_Rotation Poulie 15d", 
+            "Amp_Engrènement (15d/50d)", "Amp_Défilement Courroie", "Amp_Rotation Sortie (50d)"
+        ]
+        
+        # Tri principal par IDM3 (historique)
+        resultats_triés = resultats.sort_values("IDM3", ascending=False)
 
         # ------------------------------------------
-        # TABLES & METRICS
+        # TABLES & METRICS GLOBALES
         # ------------------------------------------
-        st.subheader("📋 État de santé du parc de Motoréducteurs")
+        st.subheader("📋 État de santé global du parc de Motoréducteurs")
         
+        moteurs_critiques = len(resultats_triés[resultats_triés["IDM3"] >= 1.5])
         col1, col2, col3 = st.columns(3)
         col1.metric("Machines analysées", len(resultats_triés))
-        col2.metric("IDM_Modulation Max trouvé", f"{resultats_triés['IDM_Modulation'].max():.5f}")
+        col2.metric("En Alarme 🔴 (IDM3 >= 1.5)", moteurs_critiques, delta=-moteurs_critiques, delta_color="inverse")
         col3.metric("Fréquence Moteur (Vitesse)", f"{f_cible_suivi:.2f} Hz")
 
-        st.write("**Classement par niveau d'Indicateur de Modulation (Moteur × Sortie) :**")
-        st.dataframe(resultats_triés[colonnes_synthese], use_container_width=True, hide_index=True)
+        st.write("**Tableau de bord d'Analyse Vibratoire Exhaustif :**")
+        st.dataframe(resultats_triés[colonnes_affichage], use_container_width=True, hide_index=True)
 
         # ------------------------------------------
-        # GRAPHIQUE FFT & EXTRACTION DES AMPLITUDES
+        # FOCUS ET GRAPHIQUE FFT
         # ------------------------------------------
         st.markdown("---")
-        st.subheader("📊 Focus Spectre & Indicateurs par Composant")
+        st.subheader("📊 Focus Spectre & Amplitudes par Composant")
         
         ensemble = st.selectbox(
-            "Sélectionner une machine pour le détail :",
+            "Sélectionner une machine pour isoler ses composants :",
             resultats_triés["Ensemble"]
         )
 
@@ -227,11 +234,12 @@ if uploaded_file:
 
         ligne_machine = resultats[resultats["Ensemble"] == ensemble].iloc[0]
         
-        # Affichage des métriques de la machine sélectionnée
-        c_kpi1, c_kpi2, c_kpi3 = st.columns(3)
-        c_kpi1.metric("Amp. Moteur (A)", f"{ligne_machine['Amp_Rotation Moteur']:.4f} V")
-        c_kpi2.metric("Amp. Sortie ~1tr/min (B)", f"{ligne_machine['Amp_Rotation Sortie (50d)']:.4f} V")
-        c_kpi3.metric("Indicateur Croisé (A × B)", f"{ligne_machine['IDM_Modulation']:.5f}", delta="Modulation")
+        # Rappel rapide des KPIs clés pour l'ensemble sélectionné
+        c_kpi1, c_kpi2, c_kpi3, c_kpi4 = st.columns(4)
+        c_kpi1.metric("Score Global IDM3", f"{ligne_machine['IDM3']:.3f}")
+        c_kpi2.metric("Indicateur Modulation", f"{ligne_machine['IDM_Modulation']:.5f}")
+        c_kpi3.metric("Énergie Bande Basse (E0_5)", f"{ligne_machine['E0_5']:.3f}")
+        c_kpi4.metric("Énergie Moteur (E10_20)", f"{ligne_machine['E10_20']:.3f}")
 
         # Graphique Plotly
         fig = px.line(
@@ -276,10 +284,10 @@ if uploaded_file:
 
             if len(modele_df) >= 5:
                 st.markdown("---")
-                st.subheader("🤖 Module IA Predictive (Random Forest)")
+                st.subheader("🤖 Apprentissage IA (Toutes Features Incluses)")
                 
-                # Ajout du nouvel indicateur croisé dans les features d'apprentissage de l'IA
-                features = ["Amp Cible (Bande)", "Entropie", "IDM3", "IDM_Modulation"]
+                # L'IA apprend désormais de TOUS les indicateurs combinés
+                features = ["Amp Cible (Bande)", "Entropie", "E0_5", "E10_20", "IDM3", "IDM_Modulation"]
                 X = modele_df[features]
                 y = modele_df["Defaut_Réel"]
 
@@ -287,30 +295,20 @@ if uploaded_file:
                 model.fit(X, y)
 
                 resultats_triés["Prédiction IA"] = model.predict(resultats_triés[features])
-                corr = resultats_triés["IDM_Modulation"].corr(resultats_triés["Defaut_Réel"])
+                corr = resultats_triés["IDM3"].corr(resultats_triés["Defaut_Réel"])
 
                 c1, c2 = st.columns([1, 3])
                 with c1:
-                    st.metric("Corrélation Nouvelle Variable / Terrain", f"{corr:.3f}")
+                    st.metric("Corrélation Globale Apprentissage", f"{corr:.3f}")
                 with c2:
                     st.dataframe(
-                        resultats_triés[["Ensemble", "Defaut_Réel", "Prédiction IA", "IDM_Modulation", "IDM3"]].dropna(subset=["Defaut_Réel"]),
+                        resultats_triés[["Ensemble", "Defaut_Réel", "Prédiction IA", "IDM3", "IDM_Modulation"]].dropna(subset=["Defaut_Réel"]),
                         hide_index=True, use_container_width=True
                     )
 
         # ------------------------------------------
-        # EXPORT
+        # EXPORT BANQUE DE DONNÉES COMPLETE (.XLSX)
         # ------------------------------------------
         st.markdown("---")
         sortie = BytesIO()
-        with pd.ExcelWriter(sortie, engine="openpyxl") as writer:
-            resultats_triés.to_excel(writer, index=False, sheet_name="Synthese_Modulation")
-
-        st.download_button(
-            label="📥 Télécharger le rapport (.xlsx)",
-            data=sortie.getvalue(),
-            file_name="Rapport_Modulation_Vibratoire.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-else:
-    st.info("👋 En attente de votre fichier Excel pour calculer l'indicateur croisé (Moteur × Sortie).")
+        with pd.
