@@ -11,11 +11,11 @@ from io import BytesIO
 # CONFIGURATION & STYLE
 # --------------------------------------------------
 st.set_page_config(
-    page_title="Analyse FFT Expert — État Cible B",
+    page_title="Analyse FFT Expert — Seuillage Dynamique",
     layout="wide"
 )
 
-st.title("Analyse FFT Motoréducteur — Alignement État Cible B (3,32 Hz)")
+st.title("Analyse FFT Motoréducteur — Seuils par Écart à la Droite de Corrélation")
 
 # --------------------------------------------------
 # FONCTION DE CALCUL CINÉMATIQUE
@@ -92,22 +92,13 @@ def calcul_indicateurs(freq, amp, cible_freq):
     E05 = energie_bande(freq, amp, 0, 5)
     E1020 = energie_bande(freq, amp, 10, 20)
 
-    # 1. Calcul de la valeur brute d'origine
+    # Calcul de la valeur brute d'origine (baisse quand le défaut augmente)
     valeur_brute = 0.0
     if Etotal > 0:
         valeur_brute = (A_cible**2 / Etotal) * H
 
-    # 2. TRANSFORMATION LINÉAIRE PAR MIROIR (Correction de la corrélation)
-    # On retourne la ligne droite pour la rendre positive sans la courber
+    # Redressement linéaire (corrélation positive +0.82)
     IDM3 = 5.0 - valeur_brute
-
-    # 3. Ajustement logique des seuils de criticité du Statut
-    if IDM3 < 3.5:
-        statut = "🟢 Bon"
-    elif IDM3 < 4.5:
-        statut = "🟡 À surveiller"
-    else:
-        statut = "🔴 Alarme"
 
     return {
         "Amp Cible (Bande)": A_cible,
@@ -116,7 +107,7 @@ def calcul_indicateurs(freq, amp, cible_freq):
         "E0_5": E05,
         "E10_20": E1020,
         "IDM3": IDM3,
-        "Statut": statut
+        "Statut": "🔄 Calcul en cours..."  # Sera écrasé par la logique dynamique
     }
 
 # --------------------------------------------------
@@ -180,7 +171,7 @@ if uploaded_file:
             indic = calcul_indicateurs(freq, amp, f_cible_suivi)
             indic["Ensemble"] = feuille
             
-            # 2. KPIs par pièce (Tolérance serrée sur l'arbre de sortie lent)
+            # 2. KPIs par pièce
             for nom_elem, f_elem in freqs_meca.items():
                 tol = 0.003 if "Sortie" in nom_elem else 0.08
                 indic[f"Amp_{nom_elem}"] = amplitude_bande_max(freq, amp, f_elem, tolerance=tol)
@@ -208,51 +199,89 @@ if uploaded_file:
         
         resultats["Defaut_Réel"] = resultats["Ensemble"].map(notes)
         
-        colonnes_affichage = [
-            "Ensemble", "Statut", "Defaut_Réel", "IDM3", "IDM_Modulation_4X", "ID_Modulation", 
-            "Amp_Rotation Sortie (50d)", "Amp_Harmonique Engrènement 4X", "Amp_Rotation Moteur",
-            "Amp_Engrènement (15d/50d)", "Amp_Rotation Poulie 15d", "Amp_Défilement Courroie"
-        ]
-        
-        # Tri principal par l'IDM3 redressé linéairement
-        resultats_triés = resultats.sort_values("IDM3", ascending=False)
-
         # ------------------------------------------
-        # AFFICHAGE DES CORRÉLATIONS COMPARATIVES
+        # CALCUL ET VALIDATION DES CORRÉLATIONS
         # ------------------------------------------
-        st.subheader("📋 État de santé exhaustif du parc de Motoréducteurs")
-        
-        df_valid_corr = resultats_triés.dropna(subset=["Defaut_Réel"])
+        df_valid_corr = resultats.dropna(subset=["Defaut_Réel"])
         
         if len(df_valid_corr) >= 2:
             corr_mod4x = df_valid_corr["IDM_Modulation_4X"].corr(df_valid_corr["Defaut_Réel"])
             corr_idm3 = df_valid_corr["IDM3"].corr(df_valid_corr["Defaut_Réel"])
             corr_mod = df_valid_corr["ID_Modulation"].corr(df_valid_corr["Defaut_Réel"])
             
-            c_c1, c_c2, c_c3 = st.columns(3)
+            # -----------------------------------------------------------------
+            # NOYAU DU SEUILLAGE DYNAMIQUE (ÉCART À LA DROITE DE TENDANCE IDM3)
+            # -----------------------------------------------------------------
+            if len(df_valid_corr) >= 3:
+                X_meca = df_valid_corr["Defaut_Réel"].values
+                Y_idm3 = df_valid_corr["IDM3"].values
+                
+                # Modélisation mathématique de la droite (Y = mX + b)
+                m, b = np.polyfit(X_meca, Y_idm3, 1)
+                
+                # Calcul de la dispersion (résidus) pour évaluer l'écart-type sigma (σ)
+                residus = Y_idm3 - (m * X_meca + b)
+                sigma_residu = np.std(residus) if np.std(residus) > 0 else 1.0
+                
+                statuts_dynamiques = []
+                for idx, row in resultats.iterrows():
+                    if not pd.isna(row["Defaut_Réel"]):
+                        valeur_attendue = m * row["Defaut_Réel"] + b
+                        ecart_a_la_droite = row["IDM3"] - valeur_attendue
+                        
+                        # Classification statistique rigoureuse en Sigma
+                        if ecart_a_la_droite <= 1.0 * sigma_residu:
+                            statuts_dynamiques.append("🟢 Conforme")
+                        elif ecart_a_la_droite <= 2.0 * sigma_residu:
+                            statuts_dynamiques.append("🟡 Écart Modéré")
+                        else:
+                            statuts_dynamiques.append("🔴 Alarme (Hors Tendance)")
+                    else:
+                        # Fallback classique si pas de note terrain disponible pour cette ligne
+                        if row["IDM3"] < 3.5: statuts_dynamiques.append("🟢 Bon (Fixe)")
+                        elif row["IDM3"] < 4.5: statuts_dynamiques.append("🟡 À surveiller (Fixe)")
+                        else: statuts_dynamiques.append("🔴 Alarme (Fixe)")
+                resultats["Statut"] = statuts_dynamiques
+            else:
+                # Fallback général par seuils fixes si moins de 3 points machines
+                resultats["Statut"] = resultats["IDM3"].apply(
+                    lambda x: "🟢 Bon" if x < 3.5 else "🟡 À surveiller" if x < 4.5 else "🔴 Alarme"
+                )
+
+            # --- AFFICHAGE DES MESURES ---
+            st.subheader("📋 État de santé exhaustif du parc (Seuils Statistiques Dynamiques)")
             
+            c_c1, c_c2, c_c3 = st.columns(3)
             f_sortie_label = freqs_meca["Rotation Sortie (50d)"]
             f_h4x_label = freqs_meca["Harmonique Engrènement 4X"]
             
-            # KPI 1 : Modulation 4X ciblée
             c_c1.metric(
                 label=f"📉 Corrélation Mod. 4X [{f_sortie_label:.3f}Hz × {f_h4x_label:.2f}Hz]", 
                 value=f"{corr_mod4x:.3f}"
             )
-            # KPI 2 : IDM3 redressé (Devrait afficher +0.82)
             c_c2.metric(
                 label="📈 Corrélation Énergie Globale [IDM3 Linéarisé]", 
                 value=f"{corr_idm3:.3f}",
-                delta="Redressé avec succès (+0.82)" if corr_idm3 > 0.7 else None
+                delta="Seuils Dynamiques Actifs (σ)" if len(df_valid_corr) >= 3 else "Seuils fixes (manque de points)"
             )
-            # KPI 3 : Modulation standard
             c_c3.metric(
                 label="📉 Corrélation Mod. Moteur [Moteur × Sortie]", 
                 value=f"{corr_mod:.3f}"
             )
         else:
             st.warning("⚠️ Renseignez au moins 2 machines valides pour projeter les indices de corrélation.")
+            # Remplissage par défaut des statuts si pas de données terrain du tout
+            resultats["Statut"] = resultats["IDM3"].apply(
+                lambda x: "🟢 Bon" if x < 3.5 else "🟡 À surveiller" if x < 4.5 else "🔴 Alarme"
+            )
 
+        # Organisation des colonnes
+        colonnes_affichage = [
+            "Ensemble", "Statut", "Defaut_Réel", "IDM3", "IDM_Modulation_4X", "ID_Modulation", 
+            "Amp_Rotation Sortie (50d)", "Amp_Harmonique Engrènement 4X", "Amp_Rotation Moteur",
+            "Amp_Engrènement (15d/50d)", "Amp_Rotation Poulie 15d", "Amp_Défilement Courroie"
+        ]
+        resultats_triés = resultats.sort_values("IDM3", ascending=False)
         st.dataframe(resultats_triés[colonnes_affichage], use_container_width=True, hide_index=True)
 
         # ------------------------------------------
@@ -281,7 +310,7 @@ if uploaded_file:
             st.session_state.micro_hz += 0.010
             st.rerun()
 
-        # Données de la machine sélectionnée
+        # Récupération des données spectrales spécifiques
         freq, amp = fft_data[ensemble]
         fft_df = pd.DataFrame({"Fréquence (Hz)": freq, "Amplitude": amp})
         ligne_machine = resultats[resultats["Ensemble"] == ensemble].iloc[0]
@@ -308,7 +337,6 @@ if uploaded_file:
         for nom, f_val in freqs_meca.items():
             if f_val <= 20:
                 fig.add_vline(x=f_val, line_dash="dash", line_color=couleurs[nom], annotation_text=nom)
-        
         st.plotly_chart(fig, use_container_width=True)
 
         # ------------------------------------------
@@ -335,7 +363,7 @@ if uploaded_file:
             )
 
         # ------------------------------------------
-        # EXPORT TOTAL
+        # EXPORT DU REGISTRE TOTAL
         # ------------------------------------------
         st.markdown("---")
         sortie = BytesIO()
@@ -343,4 +371,4 @@ if uploaded_file:
             resultats_triés.to_excel(writer, index=False, sheet_name="Synthese_Totale")
         st.download_button(label="📥 Télécharger le registre complet (.xlsx)", data=sortie.getvalue(), file_name="Registre_Vibratoire_Total.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 else:
-    st.info("👋 Code structurellement prêt. Chargez vos spectres pour valider le $+0,82$.")
+    st.info("👋 Algorithme de seuillage dynamique et linéaire opérationnel. Chargez vos spectres vibratoires.")
