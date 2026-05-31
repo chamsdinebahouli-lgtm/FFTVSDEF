@@ -4,7 +4,6 @@ import numpy as np
 from scipy.fft import rfft, rfftfreq
 from sklearn.ensemble import RandomForestRegressor
 import plotly.express as px
-import plotly.graph_objects as go
 from io import BytesIO
 
 # --------------------------------------------------
@@ -49,9 +48,8 @@ def sortie_theorique(ratio_reducteur, dents_primaire, dents_secondaire):
 # --------------------------------------------------
 def calcul_fft(df):
     """
-    FFT standard avec fenetre de Hanning.
-    fs = 50 Hz (echantillonnage 20 ms), resolution = 1/T.
-    Pour 15 000 pts : resolution brute = 1/300 s = 0.0033 Hz.
+    FFT standard avec fenêtre de Hanning.
+    fs = 50 Hz (échantillonnage 20 ms), résolution = 1/T.
     """
     t = df["ms"].values / 1000.0
     x = df["V"].values.astype(float)
@@ -66,16 +64,8 @@ def calcul_fft(df):
 
 def calcul_fft_zeropad_anchor(df, zone_max_hz=0.025, pad_factor=32):
     """
-    FFT zero-paddee x pad_factor pour la zone d'ancrage uniquement.
-
-    Contexte : fs=50 Hz, T~300 s -> resolution brute=0.0033 Hz.
-    Le pic de sortie a 0.0167 Hz est couvert par 1-2 bins seulement.
-    Le zero-padding x32 interpole le spectre a ~0.0001 Hz de resolution
-    apparente, permettant de lire la frequence du pic avec une precision
-    de +/-0.0002 Hz (+/-1.2% a 0.0167 Hz).
-
-    Note : ce n'est pas de la vraie resolution physique (limitee par T),
-    mais une interpolation spectrale suffisante pour l'ancrage.
+    FFT zéro-paddée x pad_factor pour la zone d'ancrage uniquement.
+    Permet d'interpoler artificiellement le spectre pour trouver le sommet du pic lent.
     """
     t = df["ms"].values / 1000.0
     x = df["V"].values.astype(float)
@@ -93,12 +83,11 @@ def calcul_fft_zeropad_anchor(df, zone_max_hz=0.025, pad_factor=32):
     fft_pad = np.abs(rfft(x_pad)) * (2.0 / np.sum(fenetre))
     freq_pad = rfftfreq(N_pad, d=dt)
 
-    # Retourne uniquement la zone d'ancrage pour economiser la memoire
     mask = freq_pad <= (zone_max_hz * 1.5)
     return freq_pad[mask], fft_pad[mask]
 
 def signal_info(df):
-    """Retourne les metriques cles du signal pour diagnostic de resolution."""
+    """Retourne les métriques clés du signal pour diagnostic de résolution."""
     N = len(df)
     dt = 0.020  # 20 ms fixe
     T = N * dt
@@ -119,12 +108,7 @@ def signal_info(df):
 # CALAGE AUTOMATIQUE
 # --------------------------------------------------
 def find_anchor_peak(freq, amp, zone_max_hz=0.025):
-    """
-    Cherche le pic dominant dans la zone [0.003, zone_max_hz].
-    1 rpm = 0.01667 Hz.
-    Borne basse a 0.003 Hz pour eviter le DC residuel.
-    Utiliser le spectre zero-padde pour la precision.
-    """
+    """Cherche le pic dominant dans la zone basse fréquence."""
     mask = (freq >= 0.003) & (freq <= zone_max_hz)
     if not np.any(mask):
         return None, None
@@ -134,10 +118,7 @@ def find_anchor_peak(freq, amp, zone_max_hz=0.025):
     return float(sub_freq[idx_max]), float(sub_amp[idx_max])
 
 def find_peak_near(freq, amp, target_hz, tolerance_pct=0.02):
-    """
-    Cherche le pic le plus fort dans la bande ± tolerance_pct autour de target_hz.
-    Retourne (fréquence trouvée, amplitude, trouvé).
-    """
+    """Cherche le pic le plus fort dans la bande de tolérance autour de la cible."""
     tol = target_hz * tolerance_pct
     fmin, fmax = target_hz - tol, target_hz + tol
     mask = (freq >= fmin) & (freq <= fmax)
@@ -158,21 +139,13 @@ def confidence_score(ecart_pct, amplitude, amp_max):
     return int((0.6 * ecart_score + 0.4 * amp_score) * 100)
 
 def auto_calibrate(freq, amp, machine_cfg, tolerance_pct=0.02, anchor_zone_hz=0.05, n_harmonics=4):
-    """
-    Calage automatique complet pour une machine.
-    1. Ancrage sur le pic dominant en zone basse fréquence (sortie ~1 rpm)
-    2. Remontée de la chaîne cinématique par les rapports
-    3. Identification de chaque composante dans le spectre réel
-    Retourne un dict de résultats par composante.
-    """
+    """Calage automatique complet pour une machine depuis l'ancrage sortie."""
     amp_max = np.max(amp)
 
-    # Étape 1 : ancrage
     f_anchor, a_anchor = find_anchor_peak(freq, amp, zone_max_hz=anchor_zone_hz)
     if f_anchor is None:
         return {"error": f"Aucun pic trouvé dans la zone d'ancrage [0–{anchor_zone_hz} Hz]"}
 
-    # Étape 2 : chaîne cinématique depuis l'ancre
     chain = build_chain_from_sortie(
         f_anchor,
         machine_cfg["ratio_reducteur"],
@@ -181,7 +154,6 @@ def auto_calibrate(freq, amp, machine_cfg, tolerance_pct=0.02, anchor_zone_hz=0.
         machine_cfg["dents_courroie"],
     )
 
-    # Étape 3 : identification dans le spectre
     identification = {}
     for nom, f_theoric in chain.items():
         f_found, a_found, found = find_peak_near(freq, amp, f_theoric, tolerance_pct)
@@ -215,7 +187,7 @@ def auto_calibrate(freq, amp, machine_cfg, tolerance_pct=0.02, anchor_zone_hz=0.
     }
 
 # --------------------------------------------------
-# INDICATEURS (inchangés + IDM3 recalculé sur ancre réelle)
+# INDICATEURS MATHÉMATIQUES
 # --------------------------------------------------
 def amplitude_bande_max(freq, amp, cible, tolerance=0.1):
     fmin, fmax = cible - tolerance, cible + tolerance
@@ -224,7 +196,7 @@ def amplitude_bande_max(freq, amp, cible, tolerance=0.1):
         return float(np.max(amp[mask]))
     return float(amp[np.argmin(np.abs(freq - cible))])
 
-def energie_totale(amp):
+def matrix_energie_totale(amp):
     return float(np.sum(amp**2))
 
 def energie_bande(freq, amp, fmin, fmax):
@@ -240,7 +212,7 @@ def entropie_spectrale(amp):
 
 def calcul_indicateurs(freq, amp, f_cible):
     A_cible = amplitude_bande_max(freq, amp, f_cible, tolerance=0.1)
-    Etotal   = energie_totale(amp)
+    Etotal   = matrix_energie_totale(amp)
     H        = entropie_spectrale(amp)
     E05      = energie_bande(freq, amp, 0, 5)
     E1020    = energie_bande(freq, amp, 10, 20)
@@ -256,7 +228,7 @@ def calcul_indicateurs(freq, amp, f_cible):
     }
 
 # --------------------------------------------------
-# SESSION STATE
+# SESSION STATE (MÉMOIRE PARAMÈTRES)
 # --------------------------------------------------
 if "machines" not in st.session_state:
     st.session_state.machines = [
@@ -265,38 +237,32 @@ if "machines" not in st.session_state:
     ]
 
 # --------------------------------------------------
-# BARRE LATÉRALE
+# SIDEBAR CONTROLS
 # --------------------------------------------------
 st.sidebar.header("🛠️ Configuration")
-
-# --- Fichier ---
 uploaded_file = st.sidebar.file_uploader("1. Importer le fichier Excel (.xlsx)", type=["xlsx"])
 
 st.sidebar.markdown("---")
-
-# --- Paramètres de calage automatique ---
 st.sidebar.subheader("🎯 Paramètres du calage automatique")
 
 anchor_zone = st.sidebar.slider(
     "Zone d'ancrage sortie (Hz max) :",
     min_value=0.005, max_value=0.10, value=0.025, step=0.001,
-    help="Plage basse fréquence où chercher le pic de sortie. 1 rpm = 0.0167 Hz — la zone couvre [0.001, valeur] Hz"
+    help="Plage basse fréquence où chercher le pic de sortie."
 )
 st.sidebar.caption(f"Zone active : 0.001 – {anchor_zone:.3f} Hz  |  soit 0.06 – {anchor_zone*60:.2f} rpm")
+
 tolerance_pct = st.sidebar.slider(
     "Tolérance identification (%) :",
-    min_value=0.5, max_value=5.0, value=2.0, step=0.5,
-    help="Écart max entre fréquence théorique et pic mesuré"
+    min_value=0.5, max_value=5.0, value=2.0, step=0.5
 ) / 100.0
 
 n_harmonics = st.sidebar.slider("Harmoniques à chercher :", 1, 8, 4)
 
 st.sidebar.markdown("---")
-
-# --- Cinématiques ---
 st.sidebar.subheader("⚙️ Cinématiques des machines")
 
-with st.sidebar.expander("Configurer les machines", expanded=True):
+with st.sidebar.expander("Configurer les machines", expanded=False):
     nb_machines = st.number_input("Nombre de machines :", min_value=1, max_value=10, value=len(st.session_state.machines), step=1)
 
     while len(st.session_state.machines) < nb_machines:
@@ -308,30 +274,26 @@ with st.sidebar.expander("Configurer les machines", expanded=True):
 
     for i, m in enumerate(st.session_state.machines):
         st.markdown(f"**Machine {i+1}**")
-        m["nom"]               = st.text_input("Nom",                   value=m["nom"],               key=f"nom_{i}")
-        m["ratio_reducteur"]   = st.number_input("Rapport réducteur (1:N)", value=m["ratio_reducteur"],   min_value=1,  step=1,   key=f"rr_{i}")
-        m["dents_primaire"]    = st.number_input("Dents poulie primaire",   value=m["dents_primaire"],    min_value=1,  step=1,   key=f"dp_{i}")
-        m["dents_secondaire"]  = st.number_input("Dents poulie secondaire", value=m["dents_secondaire"],  min_value=1,  step=1,   key=f"ds_{i}")
-        m["dents_courroie"]    = st.number_input("Dents courroie",          value=m["dents_courroie"],    min_value=1,  step=1,   key=f"dc_{i}")
+        m["nom"]               = st.text_input("Nom",                    value=m["nom"],               key=f"nom_{i}")
+        m["ratio_reducteur"]   = st.number_input("Rapport réducteur (1:N)", value=m["ratio_reducteur"],   min_value=1, step=1,   key=f"rr_{i}")
+        m["dents_primaire"]    = st.number_input("Dents poulie primaire",   value=m["dents_primaire"],    min_value=1, step=1,   key=f"dp_{i}")
+        m["dents_secondaire"]  = st.number_input("Dents poulie secondaire", value=m["dents_secondaire"],  min_value=1, step=1,   key=f"ds_{i}")
+        m["dents_courroie"]    = st.number_input("Dents courroie",          value=m["dents_courroie"],    min_value=1, step=1,   key=f"dc_{i}")
         f_th = sortie_theorique(m["ratio_reducteur"], m["dents_primaire"], m["dents_secondaire"])
         st.caption(f"Sortie théorique : {f_th:.5f} Hz ({f_th*60:.4f} rpm)")
-        if i < nb_machines - 1:
-            st.markdown("---")
+        if i < nb_machines - 1: st.markdown("---")
 
 st.sidebar.markdown("---")
-
-# --- Feedback terrain ---
 notes_text = st.sidebar.text_area(
     "📝 Scores de défaut réels (Feedback terrain) :",
-    value="ASM21A=2.44\nASM21B=2.74\nASM22A=1.67",
-    height=100
+    value="ASM21A=2.44\nASM21B=2.74\nASM22A=1.67", height=100
 )
 
 # --------------------------------------------------
-# LOGIQUE PRINCIPALE
+# LOGIQUE PRINCIPALE & GRAPHICS DICTIONARIES
 # --------------------------------------------------
 COLORS_MAP = {
-    "Rotation Sortie":           "#1D9E75",
+    "Rotation Sortie":          "#1D9E75",
     "Rotation Poulie Primaire":  "#7F77DD",
     "Engrènement":               "#BA7517",
     "Harmonique Engrènement 4X": "#E24B4A",
@@ -339,41 +301,26 @@ COLORS_MAP = {
     "Rotation Moteur":           "#D85A30",
 }
 
-BADGE_CONF = {
-    "high": "🟢",
-    "mid":  "🟡",
-    "low":  "🔴",
-    "none": "⚪",
-}
-
 def conf_badge(conf, found):
-    if not found:
-        return "⚪ Non trouvé"
-    if conf >= 70:
-        return f"🟢 {conf}%"
-    if conf >= 40:
-        return f"🟡 {conf}%"
+    if not found: return "⚪ Non trouvé"
+    if conf >= 70: return f"🟢 {conf}%"
+    if conf >= 40: return f"🟡 {conf}%"
     return f"🔴 {conf}%"
 
 if uploaded_file:
     xls = pd.ExcelFile(uploaded_file)
     resultats = []
-    fft_data = {}
-    fft_zp_data = {}   # spectres zero-paddes (zone ancrage)
-    calage_data = {}
-    sig_info_data = {}
+    fft_data, fft_zp_data, calage_data = {}, {}, {}
 
     # Parsing notes terrain
     notes = {}
     for ligne in notes_text.splitlines():
         if "=" in ligne:
             nom, val = ligne.split("=", 1)
-            try:
-                notes[nom.strip()] = float(val.strip())
-            except ValueError:
-                pass
+            try: notes[nom.strip()] = float(val.strip())
+            except ValueError: pass
 
-    # ── Panneau diagnostic resolution (premiere feuille valide) ──
+    # ── Panneau diagnostic résolution initiale ──
     first_valid_df = None
     for feuille in xls.sheet_names:
         try:
@@ -381,133 +328,111 @@ if uploaded_file:
             if {"ms", "V"}.issubset(_df.columns):
                 first_valid_df = _df
                 break
-        except Exception:
-            pass
+        except Exception: pass
 
     if first_valid_df is not None:
         info = signal_info(first_valid_df)
-        st.subheader("📡 Diagnostic de resolution spectrale")
+        st.subheader("📡 Diagnostic de résolution spectrale")
         ri1, ri2, ri3, ri4 = st.columns(4)
         ri1.metric("Points / acquisition", f"{info['N']:,}")
-        ri2.metric("Duree signal", f"{info['T_s']:.0f} s  ({info['T_s']/60:.1f} min)")
-        ri3.metric("Resolution brute FFT", f"{info['resolution_hz']:.5f} Hz")
+        ri2.metric("Durée signal", f"{info['T_s']:.0f} s  ({info['T_s']/60:.1f} min)")
+        ri3.metric("Résolution brute FFT", f"{info['resolution_hz']:.5f} Hz")
         ri4.metric("Bins couvrant 1 rpm (0.0167 Hz)", f"{info['bins_pour_sortie']:.1f}")
 
         if info["bins_pour_sortie"] < 3:
-            st.warning(
-                f"⚠️ Resolution brute ({info['resolution_hz']:.4f} Hz) insuffisante pour isoler le pic a 0.0167 Hz "
-                f"({info['bins_pour_sortie']:.1f} bins). "
-                f"**Zero-padding x32 active** : resolution interpolee = "
-                f"{info['resolution_hz']/32:.5f} Hz → precision ancrage ≈ ±{info['resolution_hz']/32/0.0167*100:.1f}%"
-            )
+            st.warning(f"⚠️ Résolution brute insuffisante pour isoler le pic à 0.0167 Hz. **Zero-padding x32 activé**.")
         else:
-            st.success(f"✅ Resolution suffisante ({info['bins_pour_sortie']:.1f} bins autour de 0.0167 Hz)")
+            st.success(f"✅ Résolution physique suffisante ({info['bins_pour_sortie']:.1f} bins autour de 0.0167 Hz)")
         st.markdown("---")
 
+    # Boucle sur les onglets du fichier Excel
     for feuille in xls.sheet_names:
         try:
             df = pd.read_excel(uploaded_file, sheet_name=feuille)
-            if not {"ms", "V"}.issubset(df.columns):
-                continue
+            if not {"ms", "V"}.issubset(df.columns): continue
 
-            # FFT standard (spectre complet pour affichage)
+            # Spectres FFT Standard & Zéro-Paddé
             freq, amp = calcul_fft(df)
             fft_data[feuille] = (freq, amp)
 
-            # FFT zero-paddee x32 (zone ancrage uniquement)
             freq_zp, amp_zp = calcul_fft_zeropad_anchor(df, zone_max_hz=anchor_zone, pad_factor=32)
             fft_zp_data[feuille] = (freq_zp, amp_zp)
 
-            # Trouver la cinematique correspondante
+            # Identification du modèle cinématique cible
             machine_cfg = st.session_state.machines[0]
             for m in st.session_state.machines:
                 if m["nom"].lower() in feuille.lower() or feuille.lower() in m["nom"].lower():
                     machine_cfg = m
                     break
 
-            # ── CALAGE AUTOMATIQUE sur spectre zero-padde pour l'ancrage ──
-            calage = auto_calibrate(
-                freq_zp, amp_zp, machine_cfg,
-                tolerance_pct=tolerance_pct,
-                anchor_zone_hz=anchor_zone,
-                n_harmonics=n_harmonics,
-            )
-            # Identification des autres composantes sur le spectre standard
-            if "error" not in calage:
-                f_anchor = calage["ancre_hz"]
-                chain = build_chain_from_sortie(
-                    f_anchor,
-                    machine_cfg["ratio_reducteur"],
-                    machine_cfg["dents_primaire"],
-                    machine_cfg["dents_secondaire"],
-                    machine_cfg["dents_courroie"],
-                )
-                amp_max = float(np.max(amp))
-                for nom, f_th in chain.items():
-                    if nom == "Rotation Sortie":
-                        continue  # deja trouve par zero-padding
-                    f_found, a_found, found = find_peak_near(freq, amp, f_th, tolerance_pct)
-                    ecart_pct = abs(f_found - f_th) / f_th * 100 if found else None
-                    conf = confidence_score(ecart_pct, a_found, amp_max) if found else 0
-                    harmoniques = []
-                    for h in range(2, n_harmonics + 1):
-                        fh = f_th * h
-                        fh_f, ah_f, hf = find_peak_near(freq, amp, fh, tolerance_pct)
-                        if hf:
-                            harmoniques.append({"ordre": h, "f_theorique": fh, "f_trouvee": fh_f, "amplitude": ah_f})
-                    calage["identification"][nom] = {
-                        "f_theorique": f_th,
-                        "f_trouvee":   f_found,
-                        "amplitude":   a_found,
-                        "found":       found,
-                        "ecart_pct":   ecart_pct,
-                        "confiance":   conf,
-                        "harmoniques": harmoniques,
-                        "ancre":       False,
-                    }
-
-            calage_data[feuille] = calage
-
+            # Calage via ancre sur spectre Zéro-Paddé
+            calage = auto_calibrate(freq_zp, amp_zp, machine_cfg, tolerance_pct, anchor_zone, n_harmonics)
+            
             if "error" in calage:
                 st.sidebar.warning(f"{feuille} : {calage['error']}")
                 continue
 
+            # Identification complémentaire sur spectre classique
+            f_anchor = calage["ancre_hz"]
+            chain = build_chain_from_sortie(f_anchor, machine_cfg["ratio_reducteur"], machine_cfg["dents_primaire"], machine_cfg["dents_secondaire"], machine_cfg["dents_courroie"])
+            amp_max = float(np.max(amp))
+
+            for nom, f_th in chain.items():
+                if nom == "Rotation Sortie": continue
+                f_found, a_found, found = find_peak_near(freq, amp, f_th, tolerance_pct)
+                ecart_pct = abs(f_found - f_th) / f_th * 100 if found else None
+                conf = confidence_score(ecart_pct, a_found, amp_max) if found else 0
+                
+                harmoniques = []
+                for h in range(2, n_harmonics + 1):
+                    fh = f_th * h
+                    fh_f, ah_f, hf = find_peak_near(freq, amp, fh, tolerance_pct)
+                    if hf: harmoniques.append({"ordre": h, "f_theorique": fh, "f_trouvee": fh_f, "amplitude": ah_f})
+                
+                calage["identification"][nom] = {
+                    "f_theorique": f_th, "f_trouvee": f_found, "amplitude": a_found,
+                    "found": found, "ecart_pct": ecart_pct, "confiance": conf, "harmoniques": harmoniques, "ancre": False,
+                }
+
+            calage_data[feuille] = calage
             ident = calage["identification"]
 
-            # Indicateurs globaux (ancre réelle)
-            f_cible = calage["ancre_hz"]
-            indic = calcul_indicateurs(freq, amp, f_cible)
+            # CORRECTION : Calcul des indicateurs focalisé sur la fréquence 4X trouvée (ou théorique)
+            h4x_info = ident["Harmonique Engrènement 4X"]
+            f_cible_idm3 = h4x_info["f_trouvee"] if h4x_info["found"] else h4x_info["f_theorique"]
+
+            indic = calcul_indicateurs(freq, amp, f_cible_idm3)
             indic["Ensemble"]    = feuille
             indic["Defaut_Réel"] = notes.get(feuille, np.nan)
 
-            # Amplitudes par composante (fréquences calées automatiquement)
             for nom_elem, res_elem in ident.items():
                 indic[f"Amp_{nom_elem}"] = res_elem["amplitude"]
 
-            # Ancre mesurée
             indic["Ancre_Hz"]  = calage["ancre_hz"]
             indic["Ancre_RPM"] = calage["ancre_rpm"]
 
-            # Modulations
-            indic["ID_Modulation"]    = ident["Rotation Moteur"]["amplitude"]   * ident["Rotation Sortie"]["amplitude"]
-            indic["IDM_Modulation_4X"]= ident["Rotation Sortie"]["amplitude"]   * ident["Harmonique Engrènement 4X"]["amplitude"]
+            # Sécurisation des valeurs d'amplitude pour les calculs de modulations
+            amp_moteur = ident["Rotation Moteur"]["amplitude"] if ident["Rotation Moteur"]["found"] else 0.0
+            amp_sortie = ident["Rotation Sortie"]["amplitude"] if ident["Rotation Sortie"]["found"] else 0.0
+            amp_4x     = ident["Harmonique Engrènement 4X"]["amplitude"] if ident["Harmonique Engrènement 4X"]["found"] else 0.0
+
+            indic["ID_Modulation"]     = amp_moteur * amp_sortie
+            indic["IDM_Modulation_4X"] = amp_sortie * amp_4x
 
             resultats.append(indic)
-
         except Exception as e:
-            st.sidebar.error(f"Erreur onglet {feuille} : {e}")
+            st.sidebar.error(f"Erreur traitement onglet {feuille} : {e}")
 
     if len(resultats) == 0:
-        st.warning("Aucune feuille valide (colonnes 'ms' et 'V' requises).")
+        st.warning("Aucune donnée exploitable extraite. Vérifiez la forme de vos onglets Excel.")
         st.stop()
 
     resultats_df = pd.DataFrame(resultats)
 
     # --------------------------------------------------
-    # TABLEAU DE CALAGE AUTOMATIQUE
+    # DISPLAY TABS : COMPONENT IDENTIFICATION
     # --------------------------------------------------
     st.subheader("🎯 Résultats du calage automatique par machine")
-
     tabs = st.tabs([r["Ensemble"] for _, r in resultats_df.iterrows()])
 
     for tab, (_, row) in zip(tabs, resultats_df.iterrows()):
@@ -519,33 +444,32 @@ if uploaded_file:
                 continue
 
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Ancre Sortie", f"{calage['ancre_hz']:.5f} Hz")
-            c2.metric("Ancre RPM",    f"{calage['ancre_rpm']:.4f} rpm")
-            c3.metric("Amplitude ancre", f"{calage['ancre_amp']:.4f} u.")
+            c1.metric("Ancre Sortie Détectée", f"{calage['ancre_hz']:.5f} Hz")
+            c2.metric("Vitesse de Sortie Réelle", f"{calage['ancre_rpm']:.4f} rpm")
+            c3.metric("Amplitude Ancre", f"{calage['ancre_amp']:.4f} V")
             identified = sum(1 for v in calage["identification"].values() if v["found"])
-            c4.metric("Pics identifiés", f"{identified}/{len(calage['identification'])}")
+            c4.metric("Composantes Calées", f"{identified}/{len(calage['identification'])}")
 
-            st.markdown("**Identification des composantes**")
+            st.markdown("**Tableau d'identification harmonique**")
             rows_ident = []
             for nom_elem, res in calage["identification"].items():
-                harm_str = ", ".join([f"×{h['ordre']} @ {h['f_trouvee']:.3f}Hz" for h in res["harmoniques"]]) or "—"
+                harm_str = ", ".join([f"×{h['ordre']}@{h['f_trouvee']:.2f}Hz" for h in res["harmoniques"]]) or "—"
                 rows_ident.append({
                     "Composante":          nom_elem,
                     "f théorique (Hz)":    f"{res['f_theorique']:.5f}",
-                    "f pic trouvé (Hz)":   f"{res['f_trouvee']:.5f}" if res["found"] else "—",
-                    "Amplitude (u.)":      f"{res['amplitude']:.4f}" if res["found"] else "—",
+                    "f mesurée (Hz)":      f"{res['f_trouvee']:.5f}" if res["found"] else "—",
+                    "Amplitude (V)":       f"{res['amplitude']:.4f}" if res["found"] else "—",
                     "Écart (%)":           f"{res['ecart_pct']:.3f}" if res["ecart_pct"] is not None else "—",
-                    "Confiance":           conf_badge(res["confiance"], res["found"]),
-                    "Harmoniques trouvées": harm_str,
+                    "Score Confiance":     conf_badge(res["confiance"], res["found"]),
+                    "Harmoniques Validées": harm_str
                 })
             st.dataframe(pd.DataFrame(rows_ident), hide_index=True, use_container_width=True)
 
     # --------------------------------------------------
-    # SEUILLAGE DYNAMIQUE (inchangé, sur ancre réelle)
+    # SEUILLAGE DYNAMIQUE STATISTIQUE (SIGMA)
     # --------------------------------------------------
     st.markdown("---")
-    st.subheader("📋 État de santé — Seuils Statistiques Dynamiques")
-
+    st.subheader("📋 État de santé général — Seuils Statistiques Dynamiques")
     df_valid = resultats_df.dropna(subset=["Defaut_Réel"])
 
     if len(df_valid) >= 3:
@@ -560,19 +484,13 @@ if uploaded_file:
             if not pd.isna(row["Defaut_Réel"]):
                 val_att = m_lin * row["Defaut_Réel"] + b_lin
                 ecart   = row["IDM3"] - val_att
-                if ecart <= 1.0 * sigma:
-                    statuts.append("🟢 Conforme")
-                elif ecart <= 2.0 * sigma:
-                    statuts.append("🟡 Écart Modéré")
-                else:
-                    statuts.append("🔴 Alarme (Hors Tendance)")
+                if ecart <= 1.0 * sigma: statuts.append("🟢 Conforme")
+                elif ecart <= 2.0 * sigma: statuts.append("🟡 Écart Modéré")
+                else: statuts.append("🔴 Alarme (Hors Tendance)")
             else:
-                if row["IDM3"] < 3.5:
-                    statuts.append("🟢 Bon (Fixe)")
-                elif row["IDM3"] < 4.5:
-                    statuts.append("🟡 À surveiller (Fixe)")
-                else:
-                    statuts.append("🔴 Alarme (Fixe)")
+                if row["IDM3"] < 3.5: statuts.append("🟢 Bon (Fixe)")
+                elif row["IDM3"] < 4.5: statuts.append("🟡 À surveiller (Fixe)")
+                else: statuts.append("🔴 Alarme (Fixe)")
         resultats_df["Statut"] = statuts
 
         if len(df_valid) >= 2:
@@ -580,254 +498,89 @@ if uploaded_file:
             corr_idm3  = df_valid["IDM3"].corr(df_valid["Defaut_Réel"])
             corr_mod   = df_valid["ID_Modulation"].corr(df_valid["Defaut_Réel"])
             cc1, cc2, cc3 = st.columns(3)
-            cc1.metric("Corrélation Mod. 4X",         f"{corr_mod4x:.3f}")
-            cc2.metric("Corrélation IDM3 Linéarisé",  f"{corr_idm3:.3f}", delta="Seuils σ actifs")
-            cc3.metric("Corrélation Mod. Moteur",      f"{corr_mod:.3f}")
+            cc1.metric("Corrélation Mod. 4X (État B)", f"{corr_mod4x:.3f}")
+            cc2.metric("Corrélation IDM3 (Énergie Globale)", f"{corr_idm3:.3f}", delta="Modèle σ Actif")
+            cc3.metric("Corrélation Mod. Moteur", f"{corr_mod:.3f}")
     else:
-        resultats_df["Statut"] = resultats_df["IDM3"].apply(
-            lambda x: "🟢 Bon" if x < 3.5 else "🟡 À surveiller" if x < 4.5 else "🔴 Alarme"
-        )
+        resultats_df["Statut"] = resultats_df["IDM3"].apply(lambda x: "🟢 Bon" if x < 3.5 else "🟡 À surveiller" if x < 4.5 else "🔴 Alarme")
 
     colonnes_affichage = [
-        "Ensemble", "Statut", "Defaut_Réel", "Ancre_Hz", "Ancre_RPM",
-        "IDM3", "IDM_Modulation_4X", "ID_Modulation",
-        "Amp_Rotation Sortie", "Amp_Harmonique Engrènement 4X",
-        "Amp_Rotation Moteur", "Amp_Engrènement",
-        "Amp_Rotation Poulie Primaire", "Amp_Défilement Courroie",
+        "Ensemble", "Statut", "Defaut_Réel", "Ancre_Hz", "Ancre_RPM", "IDM3", "IDM_Modulation_4X", "ID_Modulation",
+        "Amp_Rotation Sortie", "Amp_Harmonique Engrènement 4X", "Amp_Rotation Moteur"
     ]
     colonnes_ok = [c for c in colonnes_affichage if c in resultats_df.columns]
-    st.dataframe(
-        resultats_df.sort_values("IDM3", ascending=False)[colonnes_ok],
-        use_container_width=True, hide_index=True
-    )
+    st.dataframe(resultats_df.sort_values("IDM3", ascending=False)[colonnes_ok], use_container_width=True, hide_index=True)
 
     # --------------------------------------------------
-    # GRAPHIQUE FFT AVEC MARQUEURS CALÉS
+    # PLOTLY GRAPHICS : SPECTRES ET ZOOM ANCRAGE
     # --------------------------------------------------
     st.markdown("---")
-    st.subheader("📊 Spectre FFT — Fréquences identifiées automatiquement")
-
-    ensemble = st.selectbox(
-        "Sélectionner une machine à analyser :",
-        resultats_df.sort_values("IDM3", ascending=False)["Ensemble"].tolist()
-    )
+    st.subheader("📊 Visualisation des spectres FFT")
+    ensemble = st.selectbox("Sélectionner une machine à analyser :", resultats_df.sort_values("IDM3", ascending=False)["Ensemble"].tolist())
 
     if ensemble in fft_data and ensemble in calage_data:
         freq, amp = fft_data[ensemble]
         calage    = calage_data[ensemble]
 
         if "error" not in calage:
-
-            # ── Graphique 1 : spectre complet 0–20 Hz ──
+            # Graphes 1 : Spectre global 0-20 Hz
             fft_df = pd.DataFrame({"Fréquence (Hz)": freq, "Amplitude": amp})
-            fig = px.line(fft_df, x="Fréquence (Hz)", y="Amplitude",
-                          title=f"Spectre FFT complet — {ensemble}")
+            fig = px.line(fft_df, x="Fréquence (Hz)", y="Amplitude", title=f"Spectre FFT complet — {ensemble}")
             fig.update_xaxes(range=[0, 20])
 
             for nom_elem, res in calage["identification"].items():
                 f_val = res["f_trouvee"] if res["found"] else res["f_theorique"]
-                if f_val > 20:
-                    continue
+                if f_val > 20: continue
                 col = COLORS_MAP.get(nom_elem, "#888888")
-                line_dash = "solid" if res["found"] else "dot"
-                fig.add_vline(
-                    x=f_val, line_dash=line_dash, line_color=col,
-                    annotation_text=nom_elem, annotation_font_color=col,
-                )
-                for h in res["harmoniques"]:
-                    if h["f_trouvee"] <= 20:
-                        fig.add_vline(
-                            x=h["f_trouvee"], line_dash="dash",
-                            line_color=col, line_width=0.8,
-                            annotation_text=f"x{h['ordre']}",
-                            annotation_font_color=col, annotation_font_size=10,
-                        )
-
-            fig.add_vline(
-                x=calage["ancre_hz"], line_dash="solid",
-                line_color="#1D9E75", line_width=2.5,
-                annotation_text=f"Ancre {calage['ancre_hz']:.5f}Hz",
-                annotation_font_color="#1D9E75",
-            )
+                fig.add_vline(x=f_val, line_dash="solid" if res["found"] else "dot", line_color=col, annotation_text=nom_elem, annotation_font_color=col)
             st.plotly_chart(fig, use_container_width=True)
 
-            # ── Graphique 2 : zoom zone ancrage (spectre zero-padde) ──
-            st.markdown("**Zoom zone d'ancrage — spectre zero-paddé ×32 (résolution interpolée ~0.0001 Hz)**")
-            st.caption(
-                f"Resolution brute : {1/300:.5f} Hz  →  Zero-padding ×32  →  "
-                f"Resolution interpolee : {1/300/32:.6f} Hz  |  "
-                f"Pic ancre : **{calage['ancre_hz']:.6f} Hz  =  {calage['ancre_rpm']:.5f} rpm**"
-            )
-
+            # Graphes 2 : Zoom Zéro-Paddé zone d'ancrage
+            st.markdown("**Focus Zone Basse Fréquence (Zéro-padding ×32 / Interpolation spectrale à ~0.0001 Hz)**")
             if ensemble in fft_zp_data:
                 freq_zp, amp_zp = fft_zp_data[ensemble]
-                # Zoom sur ±50% autour de l'ancre
                 f_anc = calage["ancre_hz"]
-                zoom_min = max(0.003, f_anc * 0.3)
-                zoom_max = min(anchor_zone, f_anc * 2.5)
-
                 zp_df = pd.DataFrame({"Fréquence (Hz)": freq_zp, "Amplitude": amp_zp})
-                fig_zp = px.line(
-                    zp_df, x="Fréquence (Hz)", y="Amplitude",
-                    title=f"Zone ancrage (zero-padde x32) — {ensemble}",
-                    color_discrete_sequence=["#1D9E75"],
-                )
-                fig_zp.update_xaxes(range=[zoom_min, zoom_max])
-                fig_zp.add_vline(
-                    x=f_anc, line_dash="solid", line_color="#1D9E75", line_width=2,
-                    annotation_text=f"Ancre {f_anc:.6f} Hz ({f_anc*60:.5f} rpm)",
-                    annotation_font_color="#1D9E75",
-                )
-                # Marquer aussi la valeur theorique
-                _mcfg = next(
-                    (m for m in st.session_state.machines
-                     if m["nom"].lower() in ensemble.lower()
-                     or ensemble.lower() in m["nom"].lower()),
-                    st.session_state.machines[0]
-                )
-                f_th_sortie = sortie_theorique(
-                    _mcfg["ratio_reducteur"],
-                    _mcfg["dents_primaire"],
-                    _mcfg["dents_secondaire"],
-                )
-                fig_zp.add_vline(
-                    x=f_th_sortie, line_dash="dash", line_color="#BA7517", line_width=1.5,
-                    annotation_text=f"Theorique {f_th_sortie:.6f} Hz",
-                    annotation_font_color="#BA7517",
-                )
-                ecart_th = (f_anc - f_th_sortie) / f_th_sortie * 100
+                fig_zp = px.line(zp_df, x="Fréquence (Hz)", y="Amplitude", title=f"Zone d'Ancrage de l'Arbre Lent — {ensemble}", color_discrete_sequence=["#1D9E75"])
+                fig_zp.update_xaxes(range=[0.003, anchor_zone])
+                fig_zp.add_vline(x=f_anc, line_color="#1D9E75", line_width=2.5, annotation_text=f"Ancre Réelle: {f_anc:.5f} Hz")
                 st.plotly_chart(fig_zp, use_container_width=True)
-                st.info(
-                    f"Ecart pic mesuré / théorique : **{ecart_th:+.3f}%**  "
-                    f"({(f_anc - f_th_sortie)*1000:.4f} mHz)  —  "
-                    f"Vitesse réelle : **{f_anc*60:.5f} rpm** vs théorique {f_th_sortie*60:.5f} rpm"
-                )
-
-            # Tableau résumé des amplitudes lues
-            st.write("**Amplitudes lues aux fréquences calées :**")
-            cols_f = st.columns(len(calage["identification"]))
-            for col_el, (nom_elem, res) in zip(cols_f, calage["identification"].items()):
-                col_el.metric(
-                    label=f"{nom_elem[:18]}\n({res['f_trouvee']:.3f} Hz)",
-                    value=f"{res['amplitude']:.4f} V",
-                    delta=f"Conf. {res['confiance']}%" if res["found"] else "Non trouvé",
-                )
 
     # --------------------------------------------------
-    # DIAGNOSTICS AUTOMATIQUES
+    # DIAGNOSTICS DE PREMIER NIVEAU AUTOMATIQUES
     # --------------------------------------------------
     st.markdown("---")
-    st.subheader("🔎 Diagnostics automatiques")
+    st.subheader("🔎 Diagnostics Automatiques de l'Installation")
 
-    for feuille, calage in calage_data.items():
-        if "error" in calage:
-            continue
-        ident = calage["identification"]
-        diags = []
+    for f_name, c_data in calage_data.items():
+        if "error" in c_data: continue
+        id_c = c_data["identification"]
+        alerts = []
 
-        eng4x  = ident.get("Harmonique Engrènement 4X", {})
-        moteur = ident.get("Rotation Moteur", {})
-        sortie = ident.get("Rotation Sortie", {})
-        courr  = ident.get("Défilement Courroie", {})
+        if id_c.get("Harmonique Engrènement 4X", {}).get("amplitude", 0) > 0.15:
+            alerts.append("🔴 **Harmonique 4X (État Cible B) critique :** Risque sévère de matage des dentures ou désalignement marqué.")
+        if id_c.get("Défilement Courroie", {}).get("amplitude", 0) > 0.05:
+            alerts.append("🟡 **Activité Courroie :** Énergie détectée sur le défilement. Inspecter une hernie ou une perte de tension.")
+        if id_c.get("Rotation Sortie", {}).get("confiance", 100) < 60:
+            alerts.append("🟡 **Ancrage Incertain :** Le pic de l'arbre lent manque d'émergence. Rallongez le temps de mesure si possible.")
 
-        if eng4x.get("found") and eng4x.get("amplitude", 0) > 0.15:
-            diags.append(("🔴", f"Harmonique 4X élevée ({eng4x['amplitude']:.3f} u.) → risque matage de denture ou désalignement"))
-        if moteur.get("found") and moteur.get("confiance", 100) < 40:
-            diags.append(("🟡", f"Pic moteur faible (confiance {moteur['confiance']}%) → vérifier vitesse nominale ou glissement"))
-        if sortie.get("confiance", 100) < 60:
-            diags.append(("🟡", f"Ancrage sortie incertain (confiance {sortie.get('confiance',0)}%) → allonger le signal ou vérifier la zone d'ancrage"))
-        if courr.get("found") and courr.get("amplitude", 0) > 0.05:
-            diags.append(("🟡", f"Courroie visible ({courr['amplitude']:.3f} u.) → inspecter hernie ou usure localisée"))
-
-        if diags:
-            with st.expander(f"⚠️ {feuille} — {len(diags)} alerte(s)"):
-                for icon, msg in diags:
-                    st.write(f"{icon} {msg}")
+        if alerts:
+            with st.expander(f"⚠️ {f_name} — {len(alerts)} alerte(s) détectée(s)"):
+                for a in alerts: st.write(a)
         else:
-            st.success(f"✅ {feuille} — Aucune anomalie détectée")
+            st.success(f"✅ {f_name} — Aucun défaut mécanique flagrant identifié.")
 
     # --------------------------------------------------
-    # LEXIQUE
+    # LEXIQUE PÉDAGOGIQUE COMPACT
     # --------------------------------------------------
-    with st.expander("💡 Aide à l'interprétation — Fréquences et leur signification physique"):
+    with st.expander("💡 Aide à l'interprétation — Signification Physique des Composantes"):
         st.markdown("""
-| Composante | Signification | Anomalie si amplitude élevée |
-|---|---|---|
-| **Rotation Sortie** | Arbre de sortie lent (~1 rpm) — **ancre du calage** | Balourd sur l'organe entraîné |
-| **Poulie Primaire** | Premier étage après réducteur | Défaut de fixation ou d'équilibrage |
-| **Engrènement** | Contact dents à dents | Usure des flancs, jeu excessif |
-| **Harmonique 4X** | 4ème harmonique d'engrènement | **Matage de denture, désalignement critique** |
-| **Défilement Courroie** | Fréquence propre de la courroie | Hernie, fêlure, tension incorrecte |
-| **Rotation Moteur** | Vitesse de l'arbre moteur | Balourd moteur, désalignement d'accouplement |
-
-> ⚠️ **Zone 16 Hz** : énergie stable non liée à l'engrènement → anomalie magnétique/électrique (barres de rotor) ou frottement large bande (roulement endommagé, perte d'huile).
+        | Composante Cinématique | Origine Mécanique dans la Machine | Causes d'Émergence d'un Pic Vibratoire |
+        | :--- | :--- | :--- |
+        | **Rotation Sortie** | Vitesse de l'arbre lent (~1 rpm). **Point d'ancrage de l'application.** | Balourd sur le récepteur ou l'organe entraîné en bout de ligne. |
+        | **Poulie Primaire** | Arbre intermédiaire du premier étage de réduction. | Fixation lâche ou défaut d'excentricité de la poulie. |
+        | **Engrènement** | Fréquence de choc naturelle du contact dent contre dent. | Usure normale ou manque de lubrification des flancs de denture. |
+        | **Harmonique Engrènement 4X** | Point de contrôle de l'**État Cible B**. | **Matage, usure sévère des engrenages ou contrainte géométrique.** |
+        | **Défilement Courroie** | Cycle complet de la courroie de transmission. | Présence d'une fêlure, hernie localisée ou mauvaise tension. |
+        | **Rotation Moteur** | Vitesse de rotation de l'arbre d'entrée électrique. | Problème d'alignement d'accouplement ou balourd moteur standard. |
         """)
-
-    # --------------------------------------------------
-    # APPRENTISSAGE IA
-    # --------------------------------------------------
-    modele_df = resultats_df.dropna(subset=["Defaut_Réel"])
-    if len(modele_df) >= 5:
-        st.markdown("---")
-        st.subheader("🤖 Apprentissage IA")
-        features = ["Amp Cible (Bande)", "Entropie", "E0_5", "E10_20", "IDM3", "ID_Modulation", "IDM_Modulation_4X"]
-        features_ok = [f for f in features if f in modele_df.columns]
-        X = modele_df[features_ok]
-        y = modele_df["Defaut_Réel"]
-        model = RandomForestRegressor(n_estimators=300, random_state=42)
-        model.fit(X, y)
-        resultats_df["Prédiction IA"] = model.predict(resultats_df[features_ok])
-        st.dataframe(
-            resultats_df[["Ensemble", "Defaut_Réel", "Prédiction IA", "IDM3", "IDM_Modulation_4X"]].dropna(subset=["Defaut_Réel"]),
-            hide_index=True, use_container_width=True
-        )
-        st.caption("⚠️ Modèle indicatif — fiabilité limitée avec peu d'échantillons. Interprétation à croiser avec l'analyse fréquentielle.")
-
-    # --------------------------------------------------
-    # EXPORT
-    # --------------------------------------------------
-    st.markdown("---")
-    sortie_bytes = BytesIO()
-    with pd.ExcelWriter(sortie_bytes, engine="openpyxl") as writer:
-        resultats_df.to_excel(writer, index=False, sheet_name="Synthese_Totale")
-
-        # Feuille de calage détaillée
-        rows_cal = []
-        for feuille, calage in calage_data.items():
-            if "error" in calage:
-                continue
-            for nom_elem, res in calage["identification"].items():
-                rows_cal.append({
-                    "Machine":         feuille,
-                    "Composante":      nom_elem,
-                    "f_theorique_Hz":  res["f_theorique"],
-                    "f_trouvee_Hz":    res["f_trouvee"] if res["found"] else None,
-                    "amplitude_u":     res["amplitude"] if res["found"] else None,
-                    "ecart_pct":       res["ecart_pct"],
-                    "confiance_pct":   res["confiance"],
-                    "ancre":           res["ancre"],
-                })
-        pd.DataFrame(rows_cal).to_excel(writer, index=False, sheet_name="Calage_Auto_Detail")
-
-    st.download_button(
-        label="📥 Télécharger le registre complet (.xlsx)",
-        data=sortie_bytes.getvalue(),
-        file_name="Registre_Vibratoire_Calage_Auto.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-
-else:
-    st.info("""
-    👋 **Interface prête — Calage automatique activé**
-
-    Le système va :
-    1. **Ancrer** sur le pic de sortie à **~0.0167 Hz (1 rpm)** dans la zone [0.005 – 0.025 Hz]
-    2. **Remonter** toute la chaîne cinématique par les rapports configurés
-    3. **Identifier** chaque fréquence dans le spectre réel avec un score de confiance
-    4. **Diagnostiquer** automatiquement les anomalies (4X, courroie, moteur)
-
-    > ℹ️ La résolution fréquentielle doit être ≤ 0.001 Hz pour détecter le pic à 0.0167 Hz.
-    > Cela nécessite un signal d'au moins **1000 s** (≈ 17 min) à fréquence d'échantillonnage suffisante.
-
-    Configurez vos cinématiques dans la barre latérale, puis importez votre fichier Excel.
-    """)
