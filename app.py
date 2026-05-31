@@ -5,22 +5,20 @@ from scipy.fft import rfft, rfftfreq
 import plotly.express as px
 
 # --------------------------------------------------
-# CONFIGURATION
+# CONFIGURATION DE L'APPLICATION
 # --------------------------------------------------
 st.set_page_config(
     page_title="Analyse FFT Motoréducteur",
     layout="wide"
 )
 
-st.title("Analyse FFT Avancée — Indicateurs de Modulation Multi-Étages")
+st.title("Plateforme d'Analyse FFT Avancée — Version Intégrale Multi-Étages")
 
 # --------------------------------------------------
 # FONCTIONS CINÉMATIQUE
 # --------------------------------------------------
 def build_chain_from_fixed_sortie(f_sortie, ratio_reducteur, dents_primaire, dents_secondaire, dents_courroie):
-    """
-    Calcule toute la chaîne cinématique à partir d'une fréquence de sortie FIXE.
-    """
+    """Calcule toute la chaîne cinématique à partir d'une fréquence de sortie FIXE."""
     f_poulie_prim = f_sortie * (dents_secondaire / dents_primaire)
     f_moteur      = f_poulie_prim * ratio_reducteur
     f_engrenement = f_poulie_prim * dents_primaire
@@ -42,7 +40,7 @@ def build_chain_from_fixed_sortie(f_sortie, ratio_reducteur, dents_primaire, den
     }
 
 # --------------------------------------------------
-# FONCTIONS FFT
+# FONCTIONS FFT & SIGNAL
 # --------------------------------------------------
 def calcul_fft(df):
     """FFT standard avec fenêtre de Hanning."""
@@ -58,6 +56,7 @@ def calcul_fft(df):
     return freq, fft_amp
 
 def signal_info(df):
+    """Retourne les métriques de qualité du signal."""
     N = len(df)
     dt = 0.020  # 20 ms fixe
     T = N * dt
@@ -75,6 +74,7 @@ def signal_info(df):
 # ANALYSE ET RECHERCHE DE PICS
 # --------------------------------------------------
 def find_peak_near(freq, amp, target_hz, tolerance_pct=0.02):
+    """Cherche le pic dominant dans la bande de tolérance autour de la cible."""
     tol = target_hz * tolerance_pct
     fmin, fmax = target_hz - tol, target_hz + tol
     mask = (freq >= fmin) & (freq <= fmax)
@@ -109,6 +109,7 @@ def process_with_fixed_vitesse(freq, amp, f_sortie_fixe, machine_cfg, tolerance_
         ecart_pct = abs(f_found - f_theoric) / f_theoric * 100 if (found and not is_sortie) else 0.0
         conf = confidence_score(ecart_pct, a_found, amp_max) if found else 0
 
+        # Recherche des harmoniques secondaires
         harmoniques = []
         for h in range(2, n_harmonics + 1):
             fh = f_theoric * h
@@ -129,7 +130,7 @@ def process_with_fixed_vitesse(freq, amp, f_sortie_fixe, machine_cfg, tolerance_
     return identification
 
 # --------------------------------------------------
-# INDICATEUR IDM3 STANDARD (POUR L'ÉTAT B / ENTREE)
+# INDICATEURS INDIVIDUELS
 # --------------------------------------------------
 def amplitude_bande_max(freq, amp, cible, tolerance=0.1):
     fmin, fmax = cible - tolerance, cible + tolerance
@@ -137,16 +138,29 @@ def amplitude_bande_max(freq, amp, cible, tolerance=0.1):
     if np.any(mask): return float(np.max(amp[mask]))
     return float(amp[np.argmin(np.abs(freq - cible))])
 
+def matrix_energie_totale(amp):
+    return float(np.sum(amp**2))
+
+def energie_bande(freq, amp, fmin, fmax):
+    return float(np.sum(amp[(freq >= fmin) & (freq <= fmax)]**2))
+
+def entropie_spectrale(amp):
+    p = amp**2
+    if np.sum(p) == 0: return 0.0
+    p = p / np.sum(p)
+    return float(-np.sum(p[p > 0] * np.log(p[p > 0])))
+
 def calcul_idm3_base(freq, amp, f_cible):
     A_cible = amplitude_bande_max(freq, amp, f_cible, tolerance=0.1)
-    Etotal   = float(np.sum(amp**2))
-    p = amp**2
-    H = float(-np.sum(p[p > 0] / np.sum(p) * np.log(p[p > 0] / np.sum(p)))) if np.sum(p) > 0 else 0.0
+    Etotal   = matrix_energie_totale(amp)
+    H        = entropie_spectrale(amp)
+    E05      = energie_bande(freq, amp, 0, 5)
+    E1020    = energie_bande(freq, amp, 10, 20)
     valeur_brute = (A_cible**2 / Etotal) * H if Etotal > 0 else 0.0
-    return 5.0 - valeur_brute, Etotal, H
+    return 5.0 - valeur_brute, Etotal, H, E05, E1020
 
 # --------------------------------------------------
-# STOCKAGE MACHINE (SESSION STATE)
+# MEMOIRE DE CONFIGURATION (SESSION STATE)
 # --------------------------------------------------
 if "machines" not in st.session_state:
     st.session_state.machines = [
@@ -155,40 +169,46 @@ if "machines" not in st.session_state:
     ]
 
 # --------------------------------------------------
-# SIDEBAR CONTROLS
+# INTERFACE BARRE LATÉRALE (SIDEBAR)
 # --------------------------------------------------
-st.sidebar.header("🛠️ Réglages Configuration")
+st.sidebar.header("🛠️ Configuration Générale")
 uploaded_file = st.sidebar.file_uploader("1. Importer le fichier Excel (.xlsx)", type=["xlsx"])
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🎯 Fréquence de Sortie Fixe")
-f_sortie_imposee = st.sidebar.number_input("Fréquence de sortie (Hz) :", min_value=0.001, max_value=2.0, value=0.01600, format="%.5f")
-st.sidebar.caption(f"Équivaut à : **{f_sortie_imposee*60:.3f} RPM**")
+vitesse_mode = st.sidebar.radio("Saisie de la vitesse via :", ["Fréquence (Hz)", "Vitesse (RPM)"])
+if vitesse_mode == "Fréquence (Hz)":
+    f_sortie_imposee = st.sidebar.number_input("Fréquence de sortie fixe (Hz) :", min_value=0.001, max_value=2.0, value=0.01600, format="%.5f")
+    st.sidebar.caption(f"Équivaut à : **{f_sortie_imposee*60:.3f} RPM**")
+else:
+    rpm_impose = st.sidebar.number_input("Vitesse de sortie fixe (RPM) :", min_value=0.01, max_value=120.0, value=0.96, format="%.2f")
+    f_sortie_imposee = rpm_impose / 60.0
+    st.sidebar.caption(f"Équivaut à : **{f_sortie_imposee:.5f} Hz**")
 
 tolerance_pct = st.sidebar.slider("Tolérance de recherche (%) :", 0.5, 5.0, 2.0, 0.5) / 100.0
 n_harmonics = st.sidebar.slider("Nombre d'harmoniques suivies :", 1, 8, 4)
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("⚙️ Cinématiques")
-with st.sidebar.expander("Gérer les paramètres machines"):
-    nb_machines = st.number_input("Nb Machines :", min_value=1, max_value=10, value=len(st.session_state.machines))
+st.sidebar.subheader("⚙️ Cinématiques des Machines")
+with st.sidebar.expander("Paramétrer les étages de réduction"):
+    nb_machines = st.number_input("Nombre de machines :", min_value=1, max_value=10, value=len(st.session_state.machines))
     while len(st.session_state.machines) < nb_machines:
         st.session_state.machines.append({"nom": f"Machine{len(st.session_state.machines)+1}", "ratio_reducteur": 246, "dents_primaire": 15, "dents_secondaire": 50, "dents_courroie": 126})
     st.session_state.machines = st.session_state.machines[:nb_machines]
 
     for i, m in enumerate(st.session_state.machines):
         st.markdown(f"**Machine {i+1}**")
-        m["nom"] = st.text_input("Nom", value=m["nom"], key=f"n_{i}")
+        m["nom"] = st.text_input("Nom de l'ensemble", value=m["nom"], key=f"n_{i}")
         m["ratio_reducteur"] = st.number_input("Ratio Réducteur", value=m["ratio_reducteur"], min_value=1, key=f"r_{i}")
-        m["dents_primaire"] = st.number_input("Dents Prim.", value=m["dents_primaire"], min_value=1, key=f"dp_{i}")
-        m["dents_secondaire"] = st.number_input("Dents Sec.", value=m["dents_secondaire"], min_value=1, key=f"ds_{i}")
+        m["dents_primaire"] = st.number_input("Dents Poulie Prim.", value=m["dents_primaire"], min_value=1, key=f"dp_{i}")
+        m["dents_secondaire"] = st.number_input("Dents Poulie Sec.", value=m["dents_secondaire"], min_value=1, key=f"ds_{i}")
         m["dents_courroie"] = st.number_input("Dents Courroie", value=m["dents_courroie"], min_value=1, key=f"dc_{i}")
 
 st.sidebar.markdown("---")
 notes_text = st.sidebar.text_area("📝 Données d'expertise terrain (Nom=Score) :", value="ASM21A=2.44\nASM21B=2.74", height=80)
 
 # --------------------------------------------------
-# LOGIQUE PRINCIPALE
+# LOGIQUE PRINCIPALE DE CALCUL
 # --------------------------------------------------
 COLORS_MAP = {
     "Rotation Sortie":                  "#1D9E75",
@@ -200,35 +220,35 @@ COLORS_MAP = {
     "Rotation Moteur":                  "#D85A30",
 }
 
+def conf_badge(conf, found, is_fixe=False):
+    if is_fixe: return "🔒 IMPOSÉ"
+    if not found: return "⚪ Non trouvé"
+    return f"🟢 {conf}%" if conf >= 70 else f"🟡 {conf}%" if conf >= 40 else f"🔴 {conf}%"
+
 if uploaded_file:
     xls = pd.ExcelFile(uploaded_file)
-    resultats = []
-    fft_data, calage_data = {}, {}
+    resultats, fft_data, calage_data = [], {}, {}
+    
+    # Parsing des notes terrain
+    notes = {line.split("=")[0].strip(): float(line.split("=")[1].strip()) for line in notes_text.splitlines() if "=" in line}
 
-    notes = {}
-    for line in notes_text.splitlines():
-        if "=" in line:
-            k, v = line.split("=", 1)
-            try: notes[k.strip()] = float(v.strip())
-            except ValueError: pass
-
-    # Diagnostic signal
+    # 1. BLOC RÉINTÉGRÉ : Diagnostic de résolution du signal
     for feuille in xls.sheet_names:
         try:
             _df = pd.read_excel(uploaded_file, sheet_name=feuille)
             if {"ms", "V"}.issubset(_df.columns):
                 info = signal_info(_df)
-                st.subheader("📡 Diagnostic de Résolution Spectrale")
+                st.subheader("📡 Diagnostic de Résolution Spectrale du Signal Temporel")
                 ri1, ri2, ri3 = st.columns(3)
-                ri1.metric("Points Mesurés", f"{info['N']:,}")
-                ri2.metric("Durée d'Acquisition", f"{info['T_s']:.1f} s ({info['T_s']/60:.1f} min)")
-                ri3.metric("Pas Fréquentiel (Δf)", f"{info['resolution_hz']:.5f} Hz")
-                st.success(f"✅ Vitesse verrouillée à {f_sortie_imposee:.5f} Hz — Indicateur de Modulation de Sortie Actif.")
+                ri1.metric("Points Mesurés / Vue", f"{info['N']:,}")
+                ri2.metric("Durée d'Acquisition (T)", f"{info['T_s']:.1f} s ({info['T_s']/60:.1f} min)")
+                ri3.metric("Résolution Fréquentielle (Δf)", f"{info['resolution_hz']:.5f} Hz")
+                st.success(f"✅ Vitesse de sortie verrouillée à {f_sortie_imposee:.5f} Hz ({f_sortie_imposee*60:.3f} RPM). Analyse multi-étages stabilisée.")
                 st.markdown("---")
                 break
         except Exception: pass
 
-    # Boucle de traitement
+    # Boucle analytique de tous les onglets
     for feuille in xls.sheet_names:
         try:
             df = pd.read_excel(uploaded_file, sheet_name=feuille)
@@ -237,6 +257,7 @@ if uploaded_file:
             freq, amp = calcul_fft(df)
             fft_data[feuille] = (freq, amp)
 
+            # Assignation de la cinématique machine
             m_cfg = st.session_state.machines[0]
             for m in st.session_state.machines:
                 if m["nom"].lower() in feuille.lower() or feuille.lower() in m["nom"].lower():
@@ -246,151 +267,176 @@ if uploaded_file:
             ident = process_with_fixed_vitesse(freq, amp, f_sortie_imposee, m_cfg, tolerance_pct, n_harmonics)
             calage_data[feuille] = ident
 
-            # Calcul IDM3 pour l'État B (Premier Étage)
+            # Calcul IDM3 basé sur l'État B (Premier Étage)
             f_B = ident["Harmonique Engrènement 4X"]["f_trouvee"]
-            idm3_B, etotal, entropie = calcul_idm3_base(freq, amp, f_B)
+            idm3_B, etotal, entropie, e05, e1020 = calcul_idm3_base(freq, amp, f_B)
 
-            # EXTRACTION DES AMPLITUDES POUR VOTRE NOUVEL INDICATEUR DE SORTIE (ÉTAT C)
+            # Extraction des données d'amplitude
             amp_sortie = ident["Rotation Sortie"]["amplitude"]
             amp_etat_c = ident["Engrènement Dernier Étage"]["amplitude"]
-            
-            # Nouvelle formule demandée : Produit de l'amplitude à 1tr/min par l'amplitude à 3.67Hz
-            indicateur_modulation_sortie = amp_sortie * amp_etat_c
 
             res_row = {
                 "Ensemble": feuille,
                 "Defaut_Réel": notes.get(feuille, np.nan),
                 "IDM3_État_B (3.20Hz)": idm3_B,
-                "Modulation_Sortie_État_C": indicateur_modulation_sortie,  # <--- VOTRE NOUVEAU KPI
-                "Amp_Rotation_Sortie (1tr/min)": amp_sortie,
+                "Modulation_Sortie_État_C": amp_sortie * amp_etat_c,         # Votre indicateur de produit
+                "Amp_Rotation_Sortie (1tr/min)": amp_sortie,                 # Base pour la corrélation sortie pure
                 "Amp_État_C_Dernier (3.67Hz)": amp_etat_c,
                 "Amp_État_B_4X": ident["Harmonique Engrènement 4X"]["amplitude"],
                 "Amp_Rotation_Moteur": ident["Rotation Moteur"]["amplitude"],
-                "Etotal": etotal,
-                "Entropie": entropie
+                "Etotal": etotal, "Entropie": entropie, "E0_5": e05, "E10_20": e1020
             }
             resultats.append(res_row)
         except Exception as e:
-            st.sidebar.error(f"Erreur sur l'onglet {feuille} : {e}")
+            st.sidebar.error(f"Erreur d'analyse sur l'onglet {feuille} : {e}")
 
-    if not resultats:
-        st.warning("Aucun onglet valide trouvé.")
-        st.stop()
+    if resultats:
+        resultats_df = pd.DataFrame(resultats)
+        df_valid = resultats_df.dropna(subset=["Defaut_Réel"])
 
-    resultats_df = pd.DataFrame(resultats)
-
-    # --------------------------------------------------
-    # SEUILLAGE STATISTIQUE DYNAMIQUE ET CALCULS R²
-    # --------------------------------------------------
-    st.subheader("📋 Synthèse de Santé Générale & Corrélations KPI vs Terrain")
-    df_valid = resultats_df.dropna(subset=["Defaut_Réel"])
-
-    if len(df_valid) >= 3:
-        X = df_valid["Defaut_Réel"].values
+        # --------------------------------------------------
+        # 2. BLOC RÉINTÉGRÉ : SÉCURISATION & CALCULS DE SEUILLAGE STATISTIQUE (SIGMA) + R² MULTIPLES
+        # --------------------------------------------------
+        st.subheader("📋 Synthèse de Santé Générale & Matrice de Performance ($R^2$)")
         
-        # Corrélation pour le premier étage (IDM3)
-        Y_B = df_valid["IDM3_État_B (3.20Hz)"].values
-        corr_B = df_valid["IDM3_État_B (3.20Hz)"].corr(df_valid["Defaut_Réel"])
-        m_lin, b_lin = np.polyfit(X, Y_B, 1)
-        sigma = np.std(Y_B - (m_lin * X + b_lin)) or 1.0
+        if len(df_valid) >= 2:
+            X = df_valid["Defaut_Réel"].values
+            
+            # Calcul des R² individuels pour comparer les approches face au terrain
+            r2_B = df_valid["IDM3_État_B (3.20Hz)"].corr(df_valid["Defaut_Réel"])**2
+            r2_Sortie_Pure = df_valid["Amp_Rotation_Sortie (1tr/min)"].corr(df_valid["Defaut_Réel"])**2
+            r2_Modulation = df_valid["Modulation_Sortie_État_C"].corr(df_valid["Defaut_Réel"])**2
 
-        # CORRÉLATION R² POUR VOTRE NOUVEL INDICATEUR DE MODULATION DE SORTIE (ÉTAT C)
-        corr_C = df_valid["Modulation_Sortie_État_C"].corr(df_valid["Defaut_Réel"])
+            # Calcul de la droite de tendance pour l'IDM3 de référence (Modèle Sigma)
+            m_lin, b_lin = np.polyfit(X, df_valid["IDM3_État_B (3.20Hz)"].values, 1)
+            sigma = np.std(df_valid["IDM3_État_B (3.20Hz)"].values - (m_lin * X + b_lin)) or 1.0
 
-        statuts = []
-        for _, r in resultats_df.iterrows():
-            if not pd.isna(r["Defaut_Réel"]):
-                val_attendue = m_lin * r["Defaut_Réel"] + b_lin
-                ecart = r["IDM3_État_B (3.20Hz)"] - val_attendue
-                if ecart <= 1.0 * sigma: statuts.append("🟢 Conforme")
-                elif ecart <= 2.0 * sigma: statuts.append("🟡 Écart Modéré")
-                else: statuts.append("🔴 Alarme Dérive")
-            else:
-                statuts.append("🟢 Bon" if r["IDM3_État_B (3.20Hz)"] < 3.5 else "🟡 À surveiller" if r["IDM3_État_B (3.20Hz)"] < 4.5 else "🔴 Alarme")
-        resultats_df["Statut_Tendance"] = statuts
+            statuts = []
+            for _, r in resultats_df.iterrows():
+                if not pd.isna(r["Defaut_Réel"]):
+                    val_attendue = m_lin * r["Defaut_Réel"] + b_lin
+                    ecart = r["IDM3_État_B (3.20Hz)"] - val_attendue
+                    if ecart <= 1.0 * sigma: statuts.append("🟢 Conforme")
+                    elif ecart <= 2.0 * sigma: statuts.append("🟡 Écart Modéré")
+                    else: statuts.append("🔴 Alarme Dérive Forte")
+                else:
+                    statuts.append("🟢 Bon" if r["IDM3_État_B (3.20Hz)"] < 3.5 else "🟡 À surveiller" if r["IDM3_État_B (3.20Hz)"] < 4.5 else "🔴 Alarme")
+            resultats_df["Statut_Tendance"] = statuts
 
-        c_cor1, c_cor2 = st.columns(2)
-        c_cor1.metric("R² Corrélation État B (IDM3)", f"{corr_B**2:.4f}", delta="Modèle d'entrée")
-        c_cor2.metric("R² Corrélation État C (Votre Indicateur)", f"{corr_C**2:.4f}", delta="Modulation de sortie")
-    else:
-        resultats_df["Statut_Tendance"] = resultats_df["IDM3_État_B (3.20Hz)"].apply(lambda x: "🟢 Bon" if x < 3.5 else "🟡 À surveiller" if x < 4.5 else "🔴 Alarme")
-        st.info("💡 Ajoutez au moins 3 valeurs de 'Défaut Réel' dans la barre latérale pour activer le calcul de dérive et les coefficients R².")
-
-    # Affichage de la table ordonnée
-    cols_order = [
-        "Ensemble", "Statut_Tendance", "Defaut_Réel", "IDM3_État_B (3.20Hz)", "Modulation_Sortie_État_C",
-        "Amp_Rotation_Sortie (1tr/min)", "Amp_État_C_Dernier (3.67Hz)", "Amp_État_B_4X", "Etotal"
-    ]
-    st.dataframe(resultats_df.sort_values("IDM3_État_B (3.20Hz)", ascending=False)[cols_order], use_container_width=True, hide_index=True)
-
-    # --------------------------------------------------
-    # DETAIL PAR MACHINE
-    # --------------------------------------------------
-    st.markdown("---")
-    st.subheader("🎯 Cinématique Interne & Identification des Harmoniques")
-    tabs = st.tabs([r["Ensemble"] for _, r in resultats_df.iterrows()])
-
-    for tab, (_, row) in zip(tabs, resultats_df.iterrows()):
-        with tab:
-            f_name = row["Ensemble"]
-            ident = calage_data[f_name]
-
-            e1, e2 = st.columns(2)
-            e1.metric("Valeur de votre KPI (Modulation Sortie)", f"{row['Modulation_Sortie_État_C']:.6f} V²")
-            e2.metric("Entropie Générale du Spectre", f"{row['Entropie']:.3f}")
-
-            rows_table = []
-            for nom_elem, res in ident.items():
-                harm_str = ", ".join([f"×{h['ordre']}@{h['f_trouvee']:.2f}Hz" for h in res["harmoniques"]]) or "—"
-                rows_table.append({
-                    "Composante":               nom_elem,
-                    "f cible Verrouillée (Hz)": f"{res['f_theorique']:.5f}",
-                    "f Réelle Détectée (Hz)":   f"{res['f_trouvee']:.5f}",
-                    "Amplitude Pic (V)":        f"{res['amplitude']:.4f}",
-                    "Écart Relatif (%)":        f"{res['ecart_pct']:.3f} %",
-                    "Harmoniques Validées":     harm_str
-                })
-            st.dataframe(pd.DataFrame(rows_table), use_container_width=True, hide_index=True)
-
-    # --------------------------------------------------
-    # GRAPHES SPECTRES INTERACTIFS
-    # --------------------------------------------------
-    st.markdown("---")
-    st.subheader("📊 Visualisation des Spectres avec Lignes de Référence Multi-Étages")
-    selected_machine = st.selectbox("Sélectionner l'ensemble à visualiser :", resultats_df["Ensemble"].tolist())
-
-    if selected_machine in fft_data and selected_machine in calage_data:
-        freq, amp = fft_data[selected_machine]
-        ident     = calage_data[selected_machine]
-
-        plot_df = pd.DataFrame({"Fréquence (Hz)": freq, "Amplitude": amp})
-        fig = px.line(plot_df, x="Fréquence (Hz)", y="Amplitude", title=f"Spectre FFT complet — {selected_machine}")
-        fig.update_xaxes(range=[0, 16])
-
-        for nom_elem, res in ident.items():
-            f_pos = res["f_theorique"]
-            if f_pos > 16: continue
-            col = COLORS_MAP.get(nom_elem, "#888888")
-            fig.add_vline(x=f_pos, line_dash="solid" if res["found"] else "dot", line_color=col, annotation_text=nom_elem, annotation_font_color=col)
-        st.plotly_chart(fig, use_container_width=True)
-
-    # --------------------------------------------------
-    # DIAGNOSTICS ET ALERTES AUTOMATIQUES
-    # --------------------------------------------------
-    st.markdown("---")
-    st.subheader("🔎 Diagnostics Générés")
-    
-    for _, r in resultats_df.iterrows():
-        alerts = []
-        name = r["Ensemble"]
-
-        if r["Amp_État_B_4X"] > 0.15:
-            alerts.append(f"🔴 **Alerte Premier Étage (3.20 Hz) :** Énergie critique (État Cible B). Forte suspicion de matage en entrée.")
-        if r["Modulation_Sortie_État_C"] > 0.01:
-            alerts.append(f"🔴 **Alerte Votre KPI (Modulation de Sortie) :** Le couplage entre le pignon à 3.67 Hz et l'excentricité de l'arbre lent dépasse le seuil critique. Risque mécanique sévère sur l'étage de puissance.")
-
-        if alerts:
-            with st.expander(f"⚠️ {name} — {len(alerts)} anomalie(s) détectée(s)"):
-                for a in alerts: st.write(a)
+            # Affichage des métriques R² de vos trois axes de recherche
+            c_cor1, c_cor2, c_cor3 = st.columns(3)
+            c_cor1.metric("R² — IDM3 État B (3.20Hz)", f"{r2_B:.4f}", help="Modèle d'entrée basé sur l'entropie.")
+            c_cor2.metric("🎯 R² — Amplitude Sortie Seule", f"{r2_Sortie_Pure:.4f}", help="Mesure de l'impact du défaut de faux-rond pur.")
+            c_cor3.metric("R² — Votre KPI Modulation C", f"{r2_Modulation:.4f}", help="Mesure de l'impact du produit Sortie x 3.67Hz.")
         else:
-            st.success(f"✅ {name} — Comportement nominal constaté sur l'indicateur d'entrée et le nouvel indicateur de modulation de sortie.")
+            resultats_df["Statut_Tendance"] = resultats_df["IDM3_État_B (3.20Hz)"].apply(lambda x: "🟢 Bon" if x < 3.5 else "🟡 À surveiller" if x < 4.5 else "🔴 Alarme")
+            st.info("💡 Ajoutez au moins 2 correspondances valides dans la barre latérale pour activer la matrice $R^2$ et le seuillage Sigma.")
+
+        # Affichage du tableau maître intégrant toutes les informations
+        cols_master = [
+            "Ensemble", "Statut_Tendance", "Defaut_Réel", "IDM3_État_B (3.20Hz)", "Modulation_Sortie_État_C",
+            "Amp_Rotation_Sortie (1tr/min)", "Amp_État_C_Dernier (3.67Hz)", "Amp_État_B_4X", "Etotal"
+        ]
+        cols_to_show = [c for c in cols_master if c in resultats_df.columns]
+        st.dataframe(resultats_df.sort_values("IDM3_État_B (3.20Hz)", ascending=False)[cols_to_show], use_container_width=True, hide_index=True)
+
+        # --------------------------------------------------
+        # 3. BLOC RÉINTÉGRÉ : COMPOSANTS INTERNES & DETAILS DES HARMONIQUES PAR ONGLET
+        # --------------------------------------------------
+        st.markdown("---")
+        st.subheader("🎯 Cinématique Interne & Analyse des Harmoniques")
+        tabs = st.tabs([r["Ensemble"] for _, r in resultats_df.iterrows()])
+
+        for tab, (_, row) in zip(tabs, resultats_df.iterrows()):
+            with tab:
+                f_name = row["Ensemble"]
+                ident = calage_data[f_name]
+
+                # Métriques énergétiques secondaires réintégrées
+                e1, e2, e3 = st.columns(3)
+                e1.metric("Énergie Zone Basse [0–5 Hz]", f"{row['E0_5']:.4f} V²")
+                e2.metric("Énergie Zone Haute [10–20 Hz]", f"{row['E10_20']:.4f} V²")
+                e3.metric("Entropie Générale du Spectre", f"{row['Entropie']:.3f}")
+
+                # Génération du tableau détaillé des composants
+                rows_table = []
+                for nom_elem, res in ident.items():
+                    harm_str = ", ".join([f"×{h['ordre']}@{h['f_trouvee']:.2f}Hz" for h in res["harmoniques"]]) or "—"
+                    rows_table.append({
+                        "Composante Cinématique":     nom_elem,
+                        "f théorique Verrouillée (Hz)": f"{res['f_theorique']:.5f}",
+                        "f Réelle Capturée (Hz)":     f"{res['f_trouvee']:.5f}",
+                        "Amplitude du Pic (V)":        f"{res['amplitude']:.4f}",
+                        "Écart de Fréquence (%)":       f"{res['ecart_pct']:.3f} %",
+                        "Qualité d'Ancrage":          conf_badge(res["confiance"], res["found"], res["fixe"]),
+                        "Harmoniques Validées":        harm_str
+                    })
+                st.dataframe(pd.DataFrame(rows_table), use_container_width=True, hide_index=True)
+
+        # --------------------------------------------------
+        # 4. BLOC RÉINTÉGRÉ : TRACÉ INTERACTIF DU SPECTRE AVEC LES LIGNES REPERES
+        # --------------------------------------------------
+        st.markdown("---")
+        st.subheader("📊 Traceur de Spectres FFT Synchronisé")
+        selected_machine = st.selectbox("Sélectionner l'ensemble à projeter :", resultats_df["Ensemble"].tolist())
+
+        if selected_machine in fft_data and selected_machine in calage_data:
+            freq, amp = fft_data[selected_machine]
+            ident     = calage_data[selected_machine]
+
+            plot_df = pd.DataFrame({"Fréquence (Hz)": freq, "Amplitude": amp})
+            fig = px.line(plot_df, x="Fréquence (Hz)", y="Amplitude", title=f"Spectre de Fréquences — {selected_machine}")
+            fig.update_xaxes(range=[0, 16]) # Focus utile sur vos composants clés
+
+            for nom_elem, res in ident.items():
+                f_pos = res["f_theorique"]
+                if f_pos > 16: continue
+                col = COLORS_MAP.get(nom_elem, "#888888")
+                fig.add_vline(
+                    x=f_pos, 
+                    line_dash="solid" if res["found"] else "dot", 
+                    line_color=col, 
+                    annotation_text=nom_elem, 
+                    annotation_font_color=col
+                )
+            st.plotly_chart(fig, use_container_width=True)
+
+        # --------------------------------------------------
+        # 5. BLOC RÉINTÉGRÉ : DIAGNOSTICS ET ALERTES AUTOMATIQUES PAR COMPOSANT
+        # --------------------------------------------------
+        st.markdown("---")
+        st.subheader("🔎 Diagnostics de Premier Niveau par Étage")
+        
+        for _, r in resultats_df.iterrows():
+            alerts = []
+            name = r["Ensemble"]
+
+            if r["Amp_État_B_4X"] > 0.15:
+                alerts.append(f"🔴 **Alerte Premier Étage (3.20 Hz) :** Énergie critique détectée sur l'État Cible B. Suspicion de matage des dentures d'entrée.")
+            if r["Modulation_Sortie_État_C"] > 0.01:
+                alerts.append(f"🔴 **Alerte Votre KPI (Modulation de Sortie) :** Le couplage entre l'engrènement à 3.67 Hz et l'excentricité de l'arbre lent dépasse le seuil critique.")
+            if r["Amp_Rotation_Sortie (1tr/min)"] > 0.08:
+                alerts.append(f"🟡 **Alerte Excentricité Arbre Lent :** Amplitude anormale détectée à 1 tr/min. Risque de voile, de faux-rond ou de contrainte d'accouplement extérieure.")
+
+            if alerts:
+                with st.expander(f"⚠️ {name} — {len(alerts)} anomalie(s) détectée(s)"):
+                    for a in alerts: st.write(a)
+            else:
+                st.success(f"✅ {name} — Comportement vibratoire nominal constaté sur l'ensemble des indicateurs d'entrée et de sortie.")
+
+        # --------------------------------------------------
+        # 6. BLOC RÉINTÉGRÉ : LEXIQUE MÉCANIQUE
+        # --------------------------------------------------
+        st.markdown("---")
+        with st.expander("💡 Lexique Mécanique — Rôle Physique des Fréquences Surveillées"):
+            st.markdown("""
+            | Composante Cinématique | Fréquence Cible ($f_{\text{sortie}} = 0.016\text{ Hz}$) | Symptômes Mécaniques en cas de Hausse du Pic |
+            | :--- | :--- | :--- |
+            | **Rotation Sortie** | $0,01600\text{ Hz}$ | Balourd, désalignement ou excentricité sur l'arbre lent (récepteur). |
+            | **Défilement Courroie** | $0,00635\text{ Hz}$ | Défaut d'aspect sur la courroie, hernie locale ou perte de tension. |
+            | **Rotation Poulie Primaire** | $0,05333\text{ Hz}$ | Défaut de fixation, usure de clavette ou faux-rond de la poulie intermédiaire. |
+            | **Engrènement 1er Étage** | $0,80000\text{ Hz}$ | Usure normale ou manque de lubrification sur le premier train de pignons. |
+            | 🎯 **Harmonique 4X (État B)** | **$3,20000\text{ Hz}$** | **Matage sévère, défaut d'engrènement ou choc cyclique en entrée (Prioritaire).** |
+            | 🎯 **Engrènement Sortie (État C)** | **$3,664\text{ Hz} \pm \text{tol}$** | **Usure par fatigue (pitting) ou surcharge de couple sur le dernier engrenage.** |
+            | **Rotation Moteur** | $13,12000\text{ Hz}$ | Balourd du rotor moteur, défaut électrique ou désalignement de l'accouplement rapide. |
+            """)
