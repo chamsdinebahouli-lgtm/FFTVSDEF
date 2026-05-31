@@ -679,19 +679,16 @@ if uploaded_file:
                     annotation_font_color="#1D9E75",
                 )
                 # Marquer aussi la valeur theorique
+                _mcfg = next(
+                    (m for m in st.session_state.machines
+                     if m["nom"].lower() in ensemble.lower()
+                     or ensemble.lower() in m["nom"].lower()),
+                    st.session_state.machines[0]
+                )
                 f_th_sortie = sortie_theorique(
-                    next(m for m in st.session_state.machines
-                         if m["nom"].lower() in ensemble.lower()
-                         or ensemble.lower() in m["nom"].lower(),
-                         st.session_state.machines[0])["ratio_reducteur"],
-                    next(m for m in st.session_state.machines
-                         if m["nom"].lower() in ensemble.lower()
-                         or ensemble.lower() in m["nom"].lower(),
-                         st.session_state.machines[0])["dents_primaire"],
-                    next(m for m in st.session_state.machines
-                         if m["nom"].lower() in ensemble.lower()
-                         or ensemble.lower() in m["nom"].lower(),
-                         st.session_state.machines[0])["dents_secondaire"],
+                    _mcfg["ratio_reducteur"],
+                    _mcfg["dents_primaire"],
+                    _mcfg["dents_secondaire"],
                 )
                 fig_zp.add_vline(
                     x=f_th_sortie, line_dash="dash", line_color="#BA7517", line_width=1.5,
