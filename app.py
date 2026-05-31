@@ -48,6 +48,11 @@ def sortie_theorique(ratio_reducteur, dents_primaire, dents_secondaire):
 # FONCTIONS FFT
 # --------------------------------------------------
 def calcul_fft(df):
+    """
+    FFT standard avec fenetre de Hanning.
+    fs = 50 Hz (echantillonnage 20 ms), resolution = 1/T.
+    Pour 15 000 pts : resolution brute = 1/300 s = 0.0033 Hz.
+    """
     t = df["ms"].values / 1000.0
     x = df["V"].values.astype(float)
     x = x - np.mean(x)
@@ -59,15 +64,68 @@ def calcul_fft(df):
     freq = rfftfreq(N, d=dt)
     return freq, fft_amp
 
+def calcul_fft_zeropad_anchor(df, zone_max_hz=0.025, pad_factor=32):
+    """
+    FFT zero-paddee x pad_factor pour la zone d'ancrage uniquement.
+
+    Contexte : fs=50 Hz, T~300 s -> resolution brute=0.0033 Hz.
+    Le pic de sortie a 0.0167 Hz est couvert par 1-2 bins seulement.
+    Le zero-padding x32 interpole le spectre a ~0.0001 Hz de resolution
+    apparente, permettant de lire la frequence du pic avec une precision
+    de +/-0.0002 Hz (+/-1.2% a 0.0167 Hz).
+
+    Note : ce n'est pas de la vraie resolution physique (limitee par T),
+    mais une interpolation spectrale suffisante pour l'ancrage.
+    """
+    t = df["ms"].values / 1000.0
+    x = df["V"].values.astype(float)
+    x = x - np.mean(x)
+    N = len(x)
+    dt = float(np.mean(np.diff(t)))
+
+    fenetre = np.hanning(N)
+    x_fen = x * fenetre
+
+    N_pad = N * pad_factor
+    x_pad = np.zeros(N_pad)
+    x_pad[:N] = x_fen
+
+    fft_pad = np.abs(rfft(x_pad)) * (2.0 / np.sum(fenetre))
+    freq_pad = rfftfreq(N_pad, d=dt)
+
+    # Retourne uniquement la zone d'ancrage pour economiser la memoire
+    mask = freq_pad <= (zone_max_hz * 1.5)
+    return freq_pad[mask], fft_pad[mask]
+
+def signal_info(df):
+    """Retourne les metriques cles du signal pour diagnostic de resolution."""
+    N = len(df)
+    dt = 0.020  # 20 ms fixe
+    T = N * dt
+    fs = 1.0 / dt
+    resolution_brute = 1.0 / T
+    f_sortie_theorique = 1.0 / 60.0  # 1 rpm en Hz
+    bins_par_tour = f_sortie_theorique / resolution_brute
+    return {
+        "N": N,
+        "dt_ms": dt * 1000,
+        "T_s": T,
+        "fs_hz": fs,
+        "resolution_hz": resolution_brute,
+        "bins_pour_sortie": bins_par_tour,
+    }
+
 # --------------------------------------------------
 # CALAGE AUTOMATIQUE
 # --------------------------------------------------
-def find_anchor_peak(freq, amp, zone_max_hz=0.05):
+def find_anchor_peak(freq, amp, zone_max_hz=0.025):
     """
-    Cherche le pic dominant dans la zone basse fréquence [0.001, zone_max_hz].
-    Retourne la fréquence et l'amplitude du pic.
+    Cherche le pic dominant dans la zone [0.003, zone_max_hz].
+    1 rpm = 0.01667 Hz.
+    Borne basse a 0.003 Hz pour eviter le DC residuel.
+    Utiliser le spectre zero-padde pour la precision.
     """
-    mask = (freq > 0.001) & (freq <= zone_max_hz)
+    mask = (freq >= 0.003) & (freq <= zone_max_hz)
     if not np.any(mask):
         return None, None
     sub_amp = amp[mask]
@@ -221,9 +279,10 @@ st.sidebar.subheader("🎯 Paramètres du calage automatique")
 
 anchor_zone = st.sidebar.slider(
     "Zone d'ancrage sortie (Hz max) :",
-    min_value=0.01, max_value=0.20, value=0.05, step=0.005,
-    help="Plage basse fréquence où chercher le pic de sortie (~1 rpm)"
+    min_value=0.005, max_value=0.10, value=0.025, step=0.001,
+    help="Plage basse fréquence où chercher le pic de sortie. 1 rpm = 0.0167 Hz — la zone couvre [0.001, valeur] Hz"
 )
+st.sidebar.caption(f"Zone active : 0.001 – {anchor_zone:.3f} Hz  |  soit 0.06 – {anchor_zone*60:.2f} rpm")
 tolerance_pct = st.sidebar.slider(
     "Tolérance identification (%) :",
     min_value=0.5, max_value=5.0, value=2.0, step=0.5,
@@ -300,7 +359,9 @@ if uploaded_file:
     xls = pd.ExcelFile(uploaded_file)
     resultats = []
     fft_data = {}
-    calage_data = {}  # résultats de calage auto par feuille
+    fft_zp_data = {}   # spectres zero-paddes (zone ancrage)
+    calage_data = {}
+    sig_info_data = {}
 
     # Parsing notes terrain
     notes = {}
@@ -312,29 +373,99 @@ if uploaded_file:
             except ValueError:
                 pass
 
+    # ── Panneau diagnostic resolution (premiere feuille valide) ──
+    first_valid_df = None
+    for feuille in xls.sheet_names:
+        try:
+            _df = pd.read_excel(uploaded_file, sheet_name=feuille)
+            if {"ms", "V"}.issubset(_df.columns):
+                first_valid_df = _df
+                break
+        except Exception:
+            pass
+
+    if first_valid_df is not None:
+        info = signal_info(first_valid_df)
+        st.subheader("📡 Diagnostic de resolution spectrale")
+        ri1, ri2, ri3, ri4 = st.columns(4)
+        ri1.metric("Points / acquisition", f"{info['N']:,}")
+        ri2.metric("Duree signal", f"{info['T_s']:.0f} s  ({info['T_s']/60:.1f} min)")
+        ri3.metric("Resolution brute FFT", f"{info['resolution_hz']:.5f} Hz")
+        ri4.metric("Bins couvrant 1 rpm (0.0167 Hz)", f"{info['bins_pour_sortie']:.1f}")
+
+        if info["bins_pour_sortie"] < 3:
+            st.warning(
+                f"⚠️ Resolution brute ({info['resolution_hz']:.4f} Hz) insuffisante pour isoler le pic a 0.0167 Hz "
+                f"({info['bins_pour_sortie']:.1f} bins). "
+                f"**Zero-padding x32 active** : resolution interpolee = "
+                f"{info['resolution_hz']/32:.5f} Hz → precision ancrage ≈ ±{info['resolution_hz']/32/0.0167*100:.1f}%"
+            )
+        else:
+            st.success(f"✅ Resolution suffisante ({info['bins_pour_sortie']:.1f} bins autour de 0.0167 Hz)")
+        st.markdown("---")
+
     for feuille in xls.sheet_names:
         try:
             df = pd.read_excel(uploaded_file, sheet_name=feuille)
             if not {"ms", "V"}.issubset(df.columns):
                 continue
 
+            # FFT standard (spectre complet pour affichage)
             freq, amp = calcul_fft(df)
             fft_data[feuille] = (freq, amp)
 
-            # Trouver la cinématique correspondante (par nom ou première par défaut)
+            # FFT zero-paddee x32 (zone ancrage uniquement)
+            freq_zp, amp_zp = calcul_fft_zeropad_anchor(df, zone_max_hz=anchor_zone, pad_factor=32)
+            fft_zp_data[feuille] = (freq_zp, amp_zp)
+
+            # Trouver la cinematique correspondante
             machine_cfg = st.session_state.machines[0]
             for m in st.session_state.machines:
                 if m["nom"].lower() in feuille.lower() or feuille.lower() in m["nom"].lower():
                     machine_cfg = m
                     break
 
-            # ── CALAGE AUTOMATIQUE ──
+            # ── CALAGE AUTOMATIQUE sur spectre zero-padde pour l'ancrage ──
             calage = auto_calibrate(
-                freq, amp, machine_cfg,
+                freq_zp, amp_zp, machine_cfg,
                 tolerance_pct=tolerance_pct,
                 anchor_zone_hz=anchor_zone,
                 n_harmonics=n_harmonics,
             )
+            # Identification des autres composantes sur le spectre standard
+            if "error" not in calage:
+                f_anchor = calage["ancre_hz"]
+                chain = build_chain_from_sortie(
+                    f_anchor,
+                    machine_cfg["ratio_reducteur"],
+                    machine_cfg["dents_primaire"],
+                    machine_cfg["dents_secondaire"],
+                    machine_cfg["dents_courroie"],
+                )
+                amp_max = float(np.max(amp))
+                for nom, f_th in chain.items():
+                    if nom == "Rotation Sortie":
+                        continue  # deja trouve par zero-padding
+                    f_found, a_found, found = find_peak_near(freq, amp, f_th, tolerance_pct)
+                    ecart_pct = abs(f_found - f_th) / f_th * 100 if found else None
+                    conf = confidence_score(ecart_pct, a_found, amp_max) if found else 0
+                    harmoniques = []
+                    for h in range(2, n_harmonics + 1):
+                        fh = f_th * h
+                        fh_f, ah_f, hf = find_peak_near(freq, amp, fh, tolerance_pct)
+                        if hf:
+                            harmoniques.append({"ordre": h, "f_theorique": fh, "f_trouvee": fh_f, "amplitude": ah_f})
+                    calage["identification"][nom] = {
+                        "f_theorique": f_th,
+                        "f_trouvee":   f_found,
+                        "amplitude":   a_found,
+                        "found":       found,
+                        "ecart_pct":   ecart_pct,
+                        "confiance":   conf,
+                        "harmoniques": harmoniques,
+                        "ancre":       False,
+                    }
+
             calage_data[feuille] = calage
 
             if "error" in calage:
@@ -486,9 +617,11 @@ if uploaded_file:
         calage    = calage_data[ensemble]
 
         if "error" not in calage:
+
+            # ── Graphique 1 : spectre complet 0–20 Hz ──
             fft_df = pd.DataFrame({"Fréquence (Hz)": freq, "Amplitude": amp})
             fig = px.line(fft_df, x="Fréquence (Hz)", y="Amplitude",
-                          title=f"Spectre FFT — {ensemble} (fréquences calées automatiquement)")
+                          title=f"Spectre FFT complet — {ensemble}")
             fig.update_xaxes(range=[0, 20])
 
             for nom_elem, res in calage["identification"].items():
@@ -496,46 +629,82 @@ if uploaded_file:
                 if f_val > 20:
                     continue
                 col = COLORS_MAP.get(nom_elem, "#888888")
-                label = f"{nom_elem}<br>{f_val:.4f} Hz"
-                if res["found"]:
-                    label += f"<br>Conf. {res['confiance']}%"
-                    line_dash = "solid"
-                else:
-                    label += "<br>(théorique)"
-                    line_dash = "dot"
-
+                line_dash = "solid" if res["found"] else "dot"
                 fig.add_vline(
-                    x=f_val,
-                    line_dash=line_dash,
-                    line_color=col,
-                    annotation_text=nom_elem,
-                    annotation_font_color=col,
+                    x=f_val, line_dash=line_dash, line_color=col,
+                    annotation_text=nom_elem, annotation_font_color=col,
                 )
-
-                # Harmoniques
                 for h in res["harmoniques"]:
                     if h["f_trouvee"] <= 20:
                         fig.add_vline(
-                            x=h["f_trouvee"],
-                            line_dash="dash",
-                            line_color=col,
-                            line_width=0.8,
-                            annotation_text=f"×{h['ordre']}",
-                            annotation_font_color=col,
-                            annotation_font_size=10,
+                            x=h["f_trouvee"], line_dash="dash",
+                            line_color=col, line_width=0.8,
+                            annotation_text=f"x{h['ordre']}",
+                            annotation_font_color=col, annotation_font_size=10,
                         )
 
-            # Surligner l'ancre
             fig.add_vline(
-                x=calage["ancre_hz"],
-                line_dash="solid",
-                line_color="#1D9E75",
-                line_width=2.5,
-                annotation_text=f"⚓ Ancre {calage['ancre_hz']:.5f}Hz",
+                x=calage["ancre_hz"], line_dash="solid",
+                line_color="#1D9E75", line_width=2.5,
+                annotation_text=f"Ancre {calage['ancre_hz']:.5f}Hz",
                 annotation_font_color="#1D9E75",
             )
-
             st.plotly_chart(fig, use_container_width=True)
+
+            # ── Graphique 2 : zoom zone ancrage (spectre zero-padde) ──
+            st.markdown("**Zoom zone d'ancrage — spectre zero-paddé ×32 (résolution interpolée ~0.0001 Hz)**")
+            st.caption(
+                f"Resolution brute : {1/300:.5f} Hz  →  Zero-padding ×32  →  "
+                f"Resolution interpolee : {1/300/32:.6f} Hz  |  "
+                f"Pic ancre : **{calage['ancre_hz']:.6f} Hz  =  {calage['ancre_rpm']:.5f} rpm**"
+            )
+
+            if ensemble in fft_zp_data:
+                freq_zp, amp_zp = fft_zp_data[ensemble]
+                # Zoom sur ±50% autour de l'ancre
+                f_anc = calage["ancre_hz"]
+                zoom_min = max(0.003, f_anc * 0.3)
+                zoom_max = min(anchor_zone, f_anc * 2.5)
+
+                zp_df = pd.DataFrame({"Fréquence (Hz)": freq_zp, "Amplitude": amp_zp})
+                fig_zp = px.line(
+                    zp_df, x="Fréquence (Hz)", y="Amplitude",
+                    title=f"Zone ancrage (zero-padde x32) — {ensemble}",
+                    color_discrete_sequence=["#1D9E75"],
+                )
+                fig_zp.update_xaxes(range=[zoom_min, zoom_max])
+                fig_zp.add_vline(
+                    x=f_anc, line_dash="solid", line_color="#1D9E75", line_width=2,
+                    annotation_text=f"Ancre {f_anc:.6f} Hz ({f_anc*60:.5f} rpm)",
+                    annotation_font_color="#1D9E75",
+                )
+                # Marquer aussi la valeur theorique
+                f_th_sortie = sortie_theorique(
+                    next(m for m in st.session_state.machines
+                         if m["nom"].lower() in ensemble.lower()
+                         or ensemble.lower() in m["nom"].lower(),
+                         st.session_state.machines[0])["ratio_reducteur"],
+                    next(m for m in st.session_state.machines
+                         if m["nom"].lower() in ensemble.lower()
+                         or ensemble.lower() in m["nom"].lower(),
+                         st.session_state.machines[0])["dents_primaire"],
+                    next(m for m in st.session_state.machines
+                         if m["nom"].lower() in ensemble.lower()
+                         or ensemble.lower() in m["nom"].lower(),
+                         st.session_state.machines[0])["dents_secondaire"],
+                )
+                fig_zp.add_vline(
+                    x=f_th_sortie, line_dash="dash", line_color="#BA7517", line_width=1.5,
+                    annotation_text=f"Theorique {f_th_sortie:.6f} Hz",
+                    annotation_font_color="#BA7517",
+                )
+                ecart_th = (f_anc - f_th_sortie) / f_th_sortie * 100
+                st.plotly_chart(fig_zp, use_container_width=True)
+                st.info(
+                    f"Ecart pic mesuré / théorique : **{ecart_th:+.3f}%**  "
+                    f"({(f_anc - f_th_sortie)*1000:.4f} mHz)  —  "
+                    f"Vitesse réelle : **{f_anc*60:.5f} rpm** vs théorique {f_th_sortie*60:.5f} rpm"
+                )
 
             # Tableau résumé des amplitudes lues
             st.write("**Amplitudes lues aux fréquences calées :**")
@@ -655,10 +824,13 @@ else:
     👋 **Interface prête — Calage automatique activé**
 
     Le système va :
-    1. **Ancrer** sur le pic dominant de la sortie (~1 rpm) — la variable la plus robuste
+    1. **Ancrer** sur le pic de sortie à **~0.0167 Hz (1 rpm)** dans la zone [0.005 – 0.025 Hz]
     2. **Remonter** toute la chaîne cinématique par les rapports configurés
     3. **Identifier** chaque fréquence dans le spectre réel avec un score de confiance
     4. **Diagnostiquer** automatiquement les anomalies (4X, courroie, moteur)
+
+    > ℹ️ La résolution fréquentielle doit être ≤ 0.001 Hz pour détecter le pic à 0.0167 Hz.
+    > Cela nécessite un signal d'au moins **1000 s** (≈ 17 min) à fréquence d'échantillonnage suffisante.
 
     Configurez vos cinématiques dans la barre latérale, puis importez votre fichier Excel.
     """)
