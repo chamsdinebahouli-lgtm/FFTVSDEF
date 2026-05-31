@@ -1,49 +1,48 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-
 from scipy.fft import rfft, rfftfreq
 from sklearn.ensemble import RandomForestRegressor
 import plotly.express as px
+import plotly.graph_objects as go
 from io import BytesIO
 
 # --------------------------------------------------
-# CONFIGURATION & STYLE
+# CONFIGURATION
 # --------------------------------------------------
 st.set_page_config(
-    page_title="Analyse FFT Expert — Seuillage Dynamique",
+    page_title="Analyse FFT — Calage Automatique",
     layout="wide"
 )
 
-st.title("Analyse FFT Motoréducteur — Alignement État Cible B (3,32 Hz)")
+st.title("Analyse FFT Motoréducteur — Calage Automatique par Ancrage Sortie")
 
 # --------------------------------------------------
-# FONCTION DE CALCUL CINÉMATIQUE
+# FONCTIONS CINÉMATIQUE
 # --------------------------------------------------
-def calculer_frequences_theoriques(vitesse_moteur_rpm, micro_ajustement_hz):
+def build_chain_from_sortie(f_sortie, ratio_reducteur, dents_primaire, dents_secondaire, dents_courroie):
     """
-    Rapports stricts calés sur l'État Cible B :
-    Moteur -> Réducteur 1:246 -> Poulie 15d -> Courroie 126d -> Poulie 50d
+    Remonte toute la chaîne cinématique depuis la fréquence de sortie mesurée.
+    Variable d'ancrage : f_sortie (la plus robuste, ~1 rpm).
     """
-    f_moteur = (vitesse_moteur_rpm / 60.0) + micro_ajustement_hz
-    vitesse_moteur_corrigee_rpm = f_moteur * 60.0
-    
-    f_poulie_15 = f_moteur / 246.0
-    f_engrenement = f_poulie_15 * 15.0
-    f_courroie = f_engrenement / 126.0
-    f_poulie_50 = f_poulie_15 * (15.0 / 50.0)
-    vitesse_sortie_rpm = f_poulie_50 * 60.0
-    
-    f_engrenement_4x = f_engrenement * 4.0
-    
+    f_poulie_prim = f_sortie * (dents_secondaire / dents_primaire)
+    f_moteur      = f_poulie_prim * ratio_reducteur
+    f_engrenement = f_poulie_prim * dents_primaire
+    f_courroie    = f_engrenement / dents_courroie
+    f_4x          = f_engrenement * 4.0
+
     return {
-        "Rotation Moteur": f_moteur,
-        "Rotation Poulie 15d": f_poulie_15,
-        "Engrènement (15d/50d)": f_engrenement,
-        "Harmonique Engrènement 4X": f_engrenement_4x,
-        "Défilement Courroie": f_courroie,
-        "Rotation Sortie (50d)": f_poulie_50
-    }, vitesse_sortie_rpm, vitesse_moteur_corrigee_rpm
+        "Rotation Sortie":          f_sortie,
+        "Rotation Poulie Primaire": f_poulie_prim,
+        "Engrènement":              f_engrenement,
+        "Harmonique Engrènement 4X": f_4x,
+        "Défilement Courroie":      f_courroie,
+        "Rotation Moteur":          f_moteur,
+    }
+
+def sortie_theorique(ratio_reducteur, dents_primaire, dents_secondaire):
+    """Fréquence de sortie théorique pour 1 tour/min moteur de référence."""
+    return (1.0 / 60.0) / ratio_reducteur * (dents_primaire / dents_secondaire)
 
 # --------------------------------------------------
 # FONCTIONS FFT
@@ -56,26 +55,122 @@ def calcul_fft(df):
     x_fenetre = x * fenetre
     dt = np.mean(np.diff(t))
     N = len(x)
-    fft = np.abs(rfft(x_fenetre)) * (2.0 / np.sum(fenetre))
+    fft_amp = np.abs(rfft(x_fenetre)) * (2.0 / np.sum(fenetre))
     freq = rfftfreq(N, d=dt)
-    return freq, fft
+    return freq, fft_amp
 
+# --------------------------------------------------
+# CALAGE AUTOMATIQUE
+# --------------------------------------------------
+def find_anchor_peak(freq, amp, zone_max_hz=0.05):
+    """
+    Cherche le pic dominant dans la zone basse fréquence [0.001, zone_max_hz].
+    Retourne la fréquence et l'amplitude du pic.
+    """
+    mask = (freq > 0.001) & (freq <= zone_max_hz)
+    if not np.any(mask):
+        return None, None
+    sub_amp = amp[mask]
+    sub_freq = freq[mask]
+    idx_max = np.argmax(sub_amp)
+    return float(sub_freq[idx_max]), float(sub_amp[idx_max])
+
+def find_peak_near(freq, amp, target_hz, tolerance_pct=0.02):
+    """
+    Cherche le pic le plus fort dans la bande ± tolerance_pct autour de target_hz.
+    Retourne (fréquence trouvée, amplitude, trouvé).
+    """
+    tol = target_hz * tolerance_pct
+    fmin, fmax = target_hz - tol, target_hz + tol
+    mask = (freq >= fmin) & (freq <= fmax)
+    if not np.any(mask):
+        idx = np.argmin(np.abs(freq - target_hz))
+        return float(freq[idx]), float(amp[idx]), False
+    sub_amp = amp[mask]
+    sub_freq = freq[mask]
+    idx_max = np.argmax(sub_amp)
+    return float(sub_freq[idx_max]), float(sub_amp[idx_max]), True
+
+def confidence_score(ecart_pct, amplitude, amp_max):
+    """Score composite : 60% précision fréquentielle + 40% amplitude relative."""
+    if amp_max <= 0:
+        return 0
+    ecart_score = max(0.0, 1.0 - (ecart_pct / 2.0))
+    amp_score   = min(1.0, amplitude / amp_max)
+    return int((0.6 * ecart_score + 0.4 * amp_score) * 100)
+
+def auto_calibrate(freq, amp, machine_cfg, tolerance_pct=0.02, anchor_zone_hz=0.05, n_harmonics=4):
+    """
+    Calage automatique complet pour une machine.
+    1. Ancrage sur le pic dominant en zone basse fréquence (sortie ~1 rpm)
+    2. Remontée de la chaîne cinématique par les rapports
+    3. Identification de chaque composante dans le spectre réel
+    Retourne un dict de résultats par composante.
+    """
+    amp_max = np.max(amp)
+
+    # Étape 1 : ancrage
+    f_anchor, a_anchor = find_anchor_peak(freq, amp, zone_max_hz=anchor_zone_hz)
+    if f_anchor is None:
+        return {"error": f"Aucun pic trouvé dans la zone d'ancrage [0–{anchor_zone_hz} Hz]"}
+
+    # Étape 2 : chaîne cinématique depuis l'ancre
+    chain = build_chain_from_sortie(
+        f_anchor,
+        machine_cfg["ratio_reducteur"],
+        machine_cfg["dents_primaire"],
+        machine_cfg["dents_secondaire"],
+        machine_cfg["dents_courroie"],
+    )
+
+    # Étape 3 : identification dans le spectre
+    identification = {}
+    for nom, f_theoric in chain.items():
+        f_found, a_found, found = find_peak_near(freq, amp, f_theoric, tolerance_pct)
+        ecart_pct = abs(f_found - f_theoric) / f_theoric * 100 if found else None
+        conf = confidence_score(ecart_pct, a_found, amp_max) if found else 0
+
+        # Harmoniques
+        harmoniques = []
+        for h in range(2, n_harmonics + 1):
+            fh = f_theoric * h
+            fh_found, ah_found, hfound = find_peak_near(freq, amp, fh, tolerance_pct)
+            if hfound:
+                harmoniques.append({"ordre": h, "f_theorique": fh, "f_trouvee": fh_found, "amplitude": ah_found})
+
+        identification[nom] = {
+            "f_theorique":  f_theoric,
+            "f_trouvee":    f_found,
+            "amplitude":    a_found,
+            "found":        found,
+            "ecart_pct":    ecart_pct,
+            "confiance":    conf,
+            "harmoniques":  harmoniques,
+            "ancre":        nom == "Rotation Sortie",
+        }
+
+    return {
+        "ancre_hz":      f_anchor,
+        "ancre_rpm":     f_anchor * 60.0,
+        "ancre_amp":     a_anchor,
+        "identification": identification,
+    }
+
+# --------------------------------------------------
+# INDICATEURS (inchangés + IDM3 recalculé sur ancre réelle)
+# --------------------------------------------------
 def amplitude_bande_max(freq, amp, cible, tolerance=0.1):
-    fmin = cible - tolerance
-    fmax = cible + tolerance
+    fmin, fmax = cible - tolerance, cible + tolerance
     mask = (freq >= fmin) & (freq <= fmax)
     if np.any(mask):
         return float(np.max(amp[mask]))
-    else:
-        idx = np.argmin(np.abs(freq - cible))
-        return float(amp[idx])
+    return float(amp[np.argmin(np.abs(freq - cible))])
 
 def energie_totale(amp):
     return float(np.sum(amp**2))
 
 def energie_bande(freq, amp, fmin, fmax):
-    mask = (freq >= fmin) & (freq <= fmax)
-    return float(np.sum(amp[mask]**2))
+    return float(np.sum(amp[(freq >= fmin) & (freq <= fmax)]**2))
 
 def entropie_spectrale(amp):
     p = amp**2
@@ -85,21 +180,14 @@ def entropie_spectrale(amp):
     p = p[p > 0]
     return float(-np.sum(p * np.log(p)))
 
-def calcul_indicateurs(freq, amp, cible_freq):
-    A_cible = amplitude_bande_max(freq, amp, cible_freq, tolerance=0.1)
-    Etotal = energie_totale(amp)
-    H = entropie_spectrale(amp)
-    E05 = energie_bande(freq, amp, 0, 5)
-    E1020 = energie_bande(freq, amp, 10, 20)
-
-    # Calcul de la valeur brute d'origine (baisse quand le défaut augmente)
-    valeur_brute = 0.0
-    if Etotal > 0:
-        valeur_brute = (A_cible**2 / Etotal) * H
-
-    # Redressement linéaire (corrélation positive +0.82)
+def calcul_indicateurs(freq, amp, f_cible):
+    A_cible = amplitude_bande_max(freq, amp, f_cible, tolerance=0.1)
+    Etotal   = energie_totale(amp)
+    H        = entropie_spectrale(amp)
+    E05      = energie_bande(freq, amp, 0, 5)
+    E1020    = energie_bande(freq, amp, 10, 20)
+    valeur_brute = (A_cible**2 / Etotal) * H if Etotal > 0 else 0.0
     IDM3 = 5.0 - valeur_brute
-
     return {
         "Amp Cible (Bande)": A_cible,
         "Etotal": Etotal,
@@ -107,57 +195,122 @@ def calcul_indicateurs(freq, amp, cible_freq):
         "E0_5": E05,
         "E10_20": E1020,
         "IDM3": IDM3,
-        "Statut": "🔄 Calcul en cours..."
     }
 
 # --------------------------------------------------
-# INITIALISATION DU SESSION STATE (MÉMOIRE)
+# SESSION STATE
 # --------------------------------------------------
-if "micro_hz" not in st.session_state:
-    st.session_state.micro_hz = 0.000
+if "machines" not in st.session_state:
+    st.session_state.machines = [
+        {"nom": "ASM21A", "ratio_reducteur": 246, "dents_primaire": 15, "dents_secondaire": 50, "dents_courroie": 126},
+        {"nom": "ASM21B", "ratio_reducteur": 246, "dents_primaire": 15, "dents_secondaire": 50, "dents_courroie": 126},
+    ]
 
 # --------------------------------------------------
 # BARRE LATÉRALE
 # --------------------------------------------------
 st.sidebar.header("🛠️ Configuration")
+
+# --- Fichier ---
 uploaded_file = st.sidebar.file_uploader("1. Importer le fichier Excel (.xlsx)", type=["xlsx"])
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("⚙️ Vitesse Nominale")
-vitesse_moteur_slider = st.sidebar.slider(
-    "Vitesse Moteur théorique (tr/min) :", 
-    min_value=400.0, max_value=2000.0, value=817.0, step=1.0
+
+# --- Paramètres de calage automatique ---
+st.sidebar.subheader("🎯 Paramètres du calage automatique")
+
+anchor_zone = st.sidebar.slider(
+    "Zone d'ancrage sortie (Hz max) :",
+    min_value=0.01, max_value=0.20, value=0.05, step=0.005,
+    help="Plage basse fréquence où chercher le pic de sortie (~1 rpm)"
 )
+tolerance_pct = st.sidebar.slider(
+    "Tolérance identification (%) :",
+    min_value=0.5, max_value=5.0, value=2.0, step=0.5,
+    help="Écart max entre fréquence théorique et pic mesuré"
+) / 100.0
 
-# Application de la correction
-freqs_meca, tr_min_sortie, tr_min_moteur_reel = calculer_frequences_theoriques(vitesse_moteur_slider, st.session_state.micro_hz)
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("📈 État du Calage")
-st.sidebar.metric("Correction active (Hz)", f"{st.session_state.micro_hz:+.3f} Hz")
-st.sidebar.metric("Moteur Réel Corrigé", f"{tr_min_moteur_reel:.2f} tr/min")
-st.sidebar.metric("Sortie Réelle Corrigée", f"{tr_min_sortie:.3f} tr/min")
-
-if st.sidebar.button("🔄 Réinitialiser le calage à 0 Hz"):
-    st.session_state.micro_hz = 0.000
-    st.rerun()
+n_harmonics = st.sidebar.slider("Harmoniques à chercher :", 1, 8, 4)
 
 st.sidebar.markdown("---")
+
+# --- Cinématiques ---
+st.sidebar.subheader("⚙️ Cinématiques des machines")
+
+with st.sidebar.expander("Configurer les machines", expanded=True):
+    nb_machines = st.number_input("Nombre de machines :", min_value=1, max_value=10, value=len(st.session_state.machines), step=1)
+
+    while len(st.session_state.machines) < nb_machines:
+        st.session_state.machines.append(
+            {"nom": f"Machine{len(st.session_state.machines)+1}", "ratio_reducteur": 246,
+             "dents_primaire": 15, "dents_secondaire": 50, "dents_courroie": 126}
+        )
+    st.session_state.machines = st.session_state.machines[:nb_machines]
+
+    for i, m in enumerate(st.session_state.machines):
+        st.markdown(f"**Machine {i+1}**")
+        m["nom"]               = st.text_input("Nom",                   value=m["nom"],               key=f"nom_{i}")
+        m["ratio_reducteur"]   = st.number_input("Rapport réducteur (1:N)", value=m["ratio_reducteur"],   min_value=1,  step=1,   key=f"rr_{i}")
+        m["dents_primaire"]    = st.number_input("Dents poulie primaire",   value=m["dents_primaire"],    min_value=1,  step=1,   key=f"dp_{i}")
+        m["dents_secondaire"]  = st.number_input("Dents poulie secondaire", value=m["dents_secondaire"],  min_value=1,  step=1,   key=f"ds_{i}")
+        m["dents_courroie"]    = st.number_input("Dents courroie",          value=m["dents_courroie"],    min_value=1,  step=1,   key=f"dc_{i}")
+        f_th = sortie_theorique(m["ratio_reducteur"], m["dents_primaire"], m["dents_secondaire"])
+        st.caption(f"Sortie théorique : {f_th:.5f} Hz ({f_th*60:.4f} rpm)")
+        if i < nb_machines - 1:
+            st.markdown("---")
+
+st.sidebar.markdown("---")
+
+# --- Feedback terrain ---
 notes_text = st.sidebar.text_area(
-    "📝 Scores de défaut réels (Feedback Terrain) :", 
-    value="ASM21A=2.44\nASM21B=2.74\nASM22A=1.67", 
-    height=120
+    "📝 Scores de défaut réels (Feedback terrain) :",
+    value="ASM21A=2.44\nASM21B=2.74\nASM22A=1.67",
+    height=100
 )
 
 # --------------------------------------------------
 # LOGIQUE PRINCIPALE
 # --------------------------------------------------
+COLORS_MAP = {
+    "Rotation Sortie":           "#1D9E75",
+    "Rotation Poulie Primaire":  "#7F77DD",
+    "Engrènement":               "#BA7517",
+    "Harmonique Engrènement 4X": "#E24B4A",
+    "Défilement Courroie":       "#185FA5",
+    "Rotation Moteur":           "#D85A30",
+}
+
+BADGE_CONF = {
+    "high": "🟢",
+    "mid":  "🟡",
+    "low":  "🔴",
+    "none": "⚪",
+}
+
+def conf_badge(conf, found):
+    if not found:
+        return "⚪ Non trouvé"
+    if conf >= 70:
+        return f"🟢 {conf}%"
+    if conf >= 40:
+        return f"🟡 {conf}%"
+    return f"🔴 {conf}%"
+
 if uploaded_file:
     xls = pd.ExcelFile(uploaded_file)
     resultats = []
     fft_data = {}
+    calage_data = {}  # résultats de calage auto par feuille
 
-    f_cible_suivi = freqs_meca["Rotation Moteur"]
+    # Parsing notes terrain
+    notes = {}
+    for ligne in notes_text.splitlines():
+        if "=" in ligne:
+            nom, val = ligne.split("=", 1)
+            try:
+                notes[nom.strip()] = float(val.strip())
+            except ValueError:
+                pass
 
     for feuille in xls.sheet_names:
         try:
@@ -166,224 +319,346 @@ if uploaded_file:
                 continue
 
             freq, amp = calcul_fft(df)
-            
-            # 1. KPIs Généraux
-            indic = calcul_indicateurs(freq, amp, f_cible_suivi)
-            indic["Ensemble"] = feuille
-            
-            # 2. KPIs par pièce
-            for nom_elem, f_elem in freqs_meca.items():
-                tol = 0.003 if "Sortie" in nom_elem else 0.08
-                indic[f"Amp_{nom_elem}"] = amplitude_bande_max(freq, amp, f_elem, tolerance=tol)
-            
-            # 3. Calculs des modulations
-            indic["ID_Modulation"] = indic["Amp_Rotation Moteur"] * indic["Amp_Rotation Sortie (50d)"]
-            indic["IDM_Modulation_4X"] = indic["Amp_Rotation Sortie (50d)"] * indic["Amp_Harmonique Engrènement 4X"]
-            
-            resultats.append(indic)
             fft_data[feuille] = (freq, amp)
+
+            # Trouver la cinématique correspondante (par nom ou première par défaut)
+            machine_cfg = st.session_state.machines[0]
+            for m in st.session_state.machines:
+                if m["nom"].lower() in feuille.lower() or feuille.lower() in m["nom"].lower():
+                    machine_cfg = m
+                    break
+
+            # ── CALAGE AUTOMATIQUE ──
+            calage = auto_calibrate(
+                freq, amp, machine_cfg,
+                tolerance_pct=tolerance_pct,
+                anchor_zone_hz=anchor_zone,
+                n_harmonics=n_harmonics,
+            )
+            calage_data[feuille] = calage
+
+            if "error" in calage:
+                st.sidebar.warning(f"{feuille} : {calage['error']}")
+                continue
+
+            ident = calage["identification"]
+
+            # Indicateurs globaux (ancre réelle)
+            f_cible = calage["ancre_hz"]
+            indic = calcul_indicateurs(freq, amp, f_cible)
+            indic["Ensemble"]    = feuille
+            indic["Defaut_Réel"] = notes.get(feuille, np.nan)
+
+            # Amplitudes par composante (fréquences calées automatiquement)
+            for nom_elem, res_elem in ident.items():
+                indic[f"Amp_{nom_elem}"] = res_elem["amplitude"]
+
+            # Ancre mesurée
+            indic["Ancre_Hz"]  = calage["ancre_hz"]
+            indic["Ancre_RPM"] = calage["ancre_rpm"]
+
+            # Modulations
+            indic["ID_Modulation"]    = ident["Rotation Moteur"]["amplitude"]   * ident["Rotation Sortie"]["amplitude"]
+            indic["IDM_Modulation_4X"]= ident["Rotation Sortie"]["amplitude"]   * ident["Harmonique Engrènement 4X"]["amplitude"]
+
+            resultats.append(indic)
+
         except Exception as e:
             st.sidebar.error(f"Erreur onglet {feuille} : {e}")
 
-    if len(resultats) > 0:
-        resultats = pd.DataFrame(resultats)
-        
-        # --- PARSING ET INTEGRATION DU DEFAUT REEL ---
-        notes = {}
-        if notes_text:
-            for ligne in notes_text.splitlines():
-                if "=" in ligne:
-                    nom, valeur = ligne.split("=")
-                    try: notes[nom.strip()] = float(valeur.strip())
-                    except: pass
-        
-        resultats["Defaut_Réel"] = resultats["Ensemble"].map(notes)
-        
-        # ------------------------------------------
-        # CALCUL ET VALIDATION DES CORRÉLATIONS
-        # ------------------------------------------
-        df_valid_corr = resultats.dropna(subset=["Defaut_Réel"])
-        
-        if len(df_valid_corr) >= 2:
-            corr_mod4x = df_valid_corr["IDM_Modulation_4X"].corr(df_valid_corr["Defaut_Réel"])
-            corr_idm3 = df_valid_corr["IDM3"].corr(df_valid_corr["Defaut_Réel"])
-            corr_mod = df_valid_corr["ID_Modulation"].corr(df_valid_corr["Defaut_Réel"])
-            
-            # -----------------------------------------------------------------
-            # NOYAU DU SEUILLAGE DYNAMIQUE (ÉCART À LA DROITE DE TENDANCE IDM3)
-            # -----------------------------------------------------------------
-            if len(df_valid_corr) >= 3:
-                X_meca = df_valid_corr["Defaut_Réel"].values
-                Y_idm3 = df_valid_corr["IDM3"].values
-                
-                # Modélisation mathématique de la droite (Y = mX + b)
-                m, b = np.polyfit(X_meca, Y_idm3, 1)
-                
-                # Calcul de la dispersion (résidus) pour évaluer l'écart-type sigma (σ)
-                residus = Y_idm3 - (m * X_meca + b)
-                sigma_residu = np.std(residus) if np.std(residus) > 0 else 1.0
-                
-                statuts_dynamiques = []
-                for idx, row in resultats.iterrows():
-                    if not pd.isna(row["Defaut_Réel"]):
-                        valeur_attendue = m * row["Defaut_Réel"] + b
-                        ecart_a_la_droite = row["IDM3"] - valeur_attendue
-                        
-                        # Classification statistique rigoureuse en Sigma
-                        if ecart_a_la_droite <= 1.0 * sigma_residu:
-                            statuts_dynamiques.append("🟢 Conforme")
-                        elif ecart_a_la_droite <= 2.0 * sigma_residu:
-                            statuts_dynamiques.append("🟡 Écart Modéré")
-                        else:
-                            statuts_dynamiques.append("🔴 Alarme (Hors Tendance)")
-                    else:
-                        # Fallback classique si pas de note terrain disponible pour cette ligne
-                        if row["IDM3"] < 3.5: statuts_dynamiques.append("🟢 Bon (Fixe)")
-                        elif row["IDM3"] < 4.5: statuts_dynamiques.append("🟡 À surveiller (Fixe)")
-                        else: statuts_dynamiques.append("🔴 Alarme (Fixe)")
-                resultats["Statut"] = statuts_dynamiques
+    if len(resultats) == 0:
+        st.warning("Aucune feuille valide (colonnes 'ms' et 'V' requises).")
+        st.stop()
+
+    resultats_df = pd.DataFrame(resultats)
+
+    # --------------------------------------------------
+    # TABLEAU DE CALAGE AUTOMATIQUE
+    # --------------------------------------------------
+    st.subheader("🎯 Résultats du calage automatique par machine")
+
+    tabs = st.tabs([r["Ensemble"] for _, r in resultats_df.iterrows()])
+
+    for tab, (_, row) in zip(tabs, resultats_df.iterrows()):
+        with tab:
+            feuille = row["Ensemble"]
+            calage  = calage_data.get(feuille, {})
+            if "error" in calage:
+                st.error(calage["error"])
+                continue
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Ancre Sortie", f"{calage['ancre_hz']:.5f} Hz")
+            c2.metric("Ancre RPM",    f"{calage['ancre_rpm']:.4f} rpm")
+            c3.metric("Amplitude ancre", f"{calage['ancre_amp']:.4f} u.")
+            identified = sum(1 for v in calage["identification"].values() if v["found"])
+            c4.metric("Pics identifiés", f"{identified}/{len(calage['identification'])}")
+
+            st.markdown("**Identification des composantes**")
+            rows_ident = []
+            for nom_elem, res in calage["identification"].items():
+                harm_str = ", ".join([f"×{h['ordre']} @ {h['f_trouvee']:.3f}Hz" for h in res["harmoniques"]]) or "—"
+                rows_ident.append({
+                    "Composante":          nom_elem,
+                    "f théorique (Hz)":    f"{res['f_theorique']:.5f}",
+                    "f pic trouvé (Hz)":   f"{res['f_trouvee']:.5f}" if res["found"] else "—",
+                    "Amplitude (u.)":      f"{res['amplitude']:.4f}" if res["found"] else "—",
+                    "Écart (%)":           f"{res['ecart_pct']:.3f}" if res["ecart_pct"] is not None else "—",
+                    "Confiance":           conf_badge(res["confiance"], res["found"]),
+                    "Harmoniques trouvées": harm_str,
+                })
+            st.dataframe(pd.DataFrame(rows_ident), hide_index=True, use_container_width=True)
+
+    # --------------------------------------------------
+    # SEUILLAGE DYNAMIQUE (inchangé, sur ancre réelle)
+    # --------------------------------------------------
+    st.markdown("---")
+    st.subheader("📋 État de santé — Seuils Statistiques Dynamiques")
+
+    df_valid = resultats_df.dropna(subset=["Defaut_Réel"])
+
+    if len(df_valid) >= 3:
+        X_meca = df_valid["Defaut_Réel"].values
+        Y_idm3 = df_valid["IDM3"].values
+        m_lin, b_lin = np.polyfit(X_meca, Y_idm3, 1)
+        residus = Y_idm3 - (m_lin * X_meca + b_lin)
+        sigma = np.std(residus) if np.std(residus) > 0 else 1.0
+
+        statuts = []
+        for _, row in resultats_df.iterrows():
+            if not pd.isna(row["Defaut_Réel"]):
+                val_att = m_lin * row["Defaut_Réel"] + b_lin
+                ecart   = row["IDM3"] - val_att
+                if ecart <= 1.0 * sigma:
+                    statuts.append("🟢 Conforme")
+                elif ecart <= 2.0 * sigma:
+                    statuts.append("🟡 Écart Modéré")
+                else:
+                    statuts.append("🔴 Alarme (Hors Tendance)")
             else:
-                resultats["Statut"] = resultats["IDM3"].apply(
-                    lambda x: "🟢 Bon" if x < 3.5 else "🟡 À surveiller" if x < 4.5 else "🔴 Alarme"
+                if row["IDM3"] < 3.5:
+                    statuts.append("🟢 Bon (Fixe)")
+                elif row["IDM3"] < 4.5:
+                    statuts.append("🟡 À surveiller (Fixe)")
+                else:
+                    statuts.append("🔴 Alarme (Fixe)")
+        resultats_df["Statut"] = statuts
+
+        if len(df_valid) >= 2:
+            corr_mod4x = df_valid["IDM_Modulation_4X"].corr(df_valid["Defaut_Réel"])
+            corr_idm3  = df_valid["IDM3"].corr(df_valid["Defaut_Réel"])
+            corr_mod   = df_valid["ID_Modulation"].corr(df_valid["Defaut_Réel"])
+            cc1, cc2, cc3 = st.columns(3)
+            cc1.metric("Corrélation Mod. 4X",         f"{corr_mod4x:.3f}")
+            cc2.metric("Corrélation IDM3 Linéarisé",  f"{corr_idm3:.3f}", delta="Seuils σ actifs")
+            cc3.metric("Corrélation Mod. Moteur",      f"{corr_mod:.3f}")
+    else:
+        resultats_df["Statut"] = resultats_df["IDM3"].apply(
+            lambda x: "🟢 Bon" if x < 3.5 else "🟡 À surveiller" if x < 4.5 else "🔴 Alarme"
+        )
+
+    colonnes_affichage = [
+        "Ensemble", "Statut", "Defaut_Réel", "Ancre_Hz", "Ancre_RPM",
+        "IDM3", "IDM_Modulation_4X", "ID_Modulation",
+        "Amp_Rotation Sortie", "Amp_Harmonique Engrènement 4X",
+        "Amp_Rotation Moteur", "Amp_Engrènement",
+        "Amp_Rotation Poulie Primaire", "Amp_Défilement Courroie",
+    ]
+    colonnes_ok = [c for c in colonnes_affichage if c in resultats_df.columns]
+    st.dataframe(
+        resultats_df.sort_values("IDM3", ascending=False)[colonnes_ok],
+        use_container_width=True, hide_index=True
+    )
+
+    # --------------------------------------------------
+    # GRAPHIQUE FFT AVEC MARQUEURS CALÉS
+    # --------------------------------------------------
+    st.markdown("---")
+    st.subheader("📊 Spectre FFT — Fréquences identifiées automatiquement")
+
+    ensemble = st.selectbox(
+        "Sélectionner une machine à analyser :",
+        resultats_df.sort_values("IDM3", ascending=False)["Ensemble"].tolist()
+    )
+
+    if ensemble in fft_data and ensemble in calage_data:
+        freq, amp = fft_data[ensemble]
+        calage    = calage_data[ensemble]
+
+        if "error" not in calage:
+            fft_df = pd.DataFrame({"Fréquence (Hz)": freq, "Amplitude": amp})
+            fig = px.line(fft_df, x="Fréquence (Hz)", y="Amplitude",
+                          title=f"Spectre FFT — {ensemble} (fréquences calées automatiquement)")
+            fig.update_xaxes(range=[0, 20])
+
+            for nom_elem, res in calage["identification"].items():
+                f_val = res["f_trouvee"] if res["found"] else res["f_theorique"]
+                if f_val > 20:
+                    continue
+                col = COLORS_MAP.get(nom_elem, "#888888")
+                label = f"{nom_elem}<br>{f_val:.4f} Hz"
+                if res["found"]:
+                    label += f"<br>Conf. {res['confiance']}%"
+                    line_dash = "solid"
+                else:
+                    label += "<br>(théorique)"
+                    line_dash = "dot"
+
+                fig.add_vline(
+                    x=f_val,
+                    line_dash=line_dash,
+                    line_color=col,
+                    annotation_text=nom_elem,
+                    annotation_font_color=col,
                 )
 
-            # --- AFFICHAGE DES MESURES ---
-            st.subheader("📋 État de santé exhaustif du parc (Seuils Statistiques Dynamiques)")
-            
-            c_c1, c_c2, c_c3 = st.columns(3)
-            f_sortie_label = freqs_meca["Rotation Sortie (50d)"]
-            f_h4x_label = freqs_meca["Harmonique Engrènement 4X"]
-            
-            c_c1.metric(
-                label=f"📉 Corrélation Mod. 4X [{f_sortie_label:.3f}Hz × {f_h4x_label:.2f}Hz]", 
-                value=f"{corr_mod4x:.3f}"
+                # Harmoniques
+                for h in res["harmoniques"]:
+                    if h["f_trouvee"] <= 20:
+                        fig.add_vline(
+                            x=h["f_trouvee"],
+                            line_dash="dash",
+                            line_color=col,
+                            line_width=0.8,
+                            annotation_text=f"×{h['ordre']}",
+                            annotation_font_color=col,
+                            annotation_font_size=10,
+                        )
+
+            # Surligner l'ancre
+            fig.add_vline(
+                x=calage["ancre_hz"],
+                line_dash="solid",
+                line_color="#1D9E75",
+                line_width=2.5,
+                annotation_text=f"⚓ Ancre {calage['ancre_hz']:.5f}Hz",
+                annotation_font_color="#1D9E75",
             )
-            c_c2.metric(
-                label="📈 Corrélation Énergie Globale [IDM3 Linéarisé]", 
-                value=f"{corr_idm3:.3f}",
-                delta="Seuils Dynamiques Actifs (σ)" if len(df_valid_corr) >= 3 else "Seuils fixes (manque de points)"
-            )
-            c_c3.metric(
-                label="📉 Corrélation Mod. Moteur [Moteur × Sortie]", 
-                value=f"{corr_mod:.3f}"
-            )
+
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Tableau résumé des amplitudes lues
+            st.write("**Amplitudes lues aux fréquences calées :**")
+            cols_f = st.columns(len(calage["identification"]))
+            for col_el, (nom_elem, res) in zip(cols_f, calage["identification"].items()):
+                col_el.metric(
+                    label=f"{nom_elem[:18]}\n({res['f_trouvee']:.3f} Hz)",
+                    value=f"{res['amplitude']:.4f} V",
+                    delta=f"Conf. {res['confiance']}%" if res["found"] else "Non trouvé",
+                )
+
+    # --------------------------------------------------
+    # DIAGNOSTICS AUTOMATIQUES
+    # --------------------------------------------------
+    st.markdown("---")
+    st.subheader("🔎 Diagnostics automatiques")
+
+    for feuille, calage in calage_data.items():
+        if "error" in calage:
+            continue
+        ident = calage["identification"]
+        diags = []
+
+        eng4x  = ident.get("Harmonique Engrènement 4X", {})
+        moteur = ident.get("Rotation Moteur", {})
+        sortie = ident.get("Rotation Sortie", {})
+        courr  = ident.get("Défilement Courroie", {})
+
+        if eng4x.get("found") and eng4x.get("amplitude", 0) > 0.15:
+            diags.append(("🔴", f"Harmonique 4X élevée ({eng4x['amplitude']:.3f} u.) → risque matage de denture ou désalignement"))
+        if moteur.get("found") and moteur.get("confiance", 100) < 40:
+            diags.append(("🟡", f"Pic moteur faible (confiance {moteur['confiance']}%) → vérifier vitesse nominale ou glissement"))
+        if sortie.get("confiance", 100) < 60:
+            diags.append(("🟡", f"Ancrage sortie incertain (confiance {sortie.get('confiance',0)}%) → allonger le signal ou vérifier la zone d'ancrage"))
+        if courr.get("found") and courr.get("amplitude", 0) > 0.05:
+            diags.append(("🟡", f"Courroie visible ({courr['amplitude']:.3f} u.) → inspecter hernie ou usure localisée"))
+
+        if diags:
+            with st.expander(f"⚠️ {feuille} — {len(diags)} alerte(s)"):
+                for icon, msg in diags:
+                    st.write(f"{icon} {msg}")
         else:
-            st.warning("⚠️ Renseignez au moins 2 machines valides pour projeter les indices de corrélation.")
-            resultats["Statut"] = resultats["IDM3"].apply(
-                lambda x: "🟢 Bon" if x < 3.5 else "🟡 À surveiller" if x < 4.5 else "🔴 Alarme"
-            )
+            st.success(f"✅ {feuille} — Aucune anomalie détectée")
 
-        # Organisation des colonnes
-        colonnes_affichage = [
-            "Ensemble", "Statut", "Defaut_Réel", "IDM3", "IDM_Modulation_4X", "ID_Modulation", 
-            "Amp_Rotation Sortie (50d)", "Amp_Harmonique Engrènement 4X", "Amp_Rotation Moteur",
-            "Amp_Engrènement (15d/50d)", "Amp_Rotation Poulie 15d", "Amp_Défilement Courroie"
-        ]
-        resultats_triés = resultats.sort_values("IDM3", ascending=False)
-        st.dataframe(resultats_triés[colonnes_affichage], use_container_width=True, hide_index=True)
+    # --------------------------------------------------
+    # LEXIQUE
+    # --------------------------------------------------
+    with st.expander("💡 Aide à l'interprétation — Fréquences et leur signification physique"):
+        st.markdown("""
+| Composante | Signification | Anomalie si amplitude élevée |
+|---|---|---|
+| **Rotation Sortie** | Arbre de sortie lent (~1 rpm) — **ancre du calage** | Balourd sur l'organe entraîné |
+| **Poulie Primaire** | Premier étage après réducteur | Défaut de fixation ou d'équilibrage |
+| **Engrènement** | Contact dents à dents | Usure des flancs, jeu excessif |
+| **Harmonique 4X** | 4ème harmonique d'engrènement | **Matage de denture, désalignement critique** |
+| **Défilement Courroie** | Fréquence propre de la courroie | Hernie, fêlure, tension incorrecte |
+| **Rotation Moteur** | Vitesse de l'arbre moteur | Balourd moteur, désalignement d'accouplement |
 
-        # ------------------------------------------
-        # COMMANDES DE RECALAGE
-        # ------------------------------------------
+> ⚠️ **Zone 16 Hz** : énergie stable non liée à l'engrènement → anomalie magnétique/électrique (barres de rotor) ou frottement large bande (roulement endommagé, perte d'huile).
+        """)
+
+    # --------------------------------------------------
+    # APPRENTISSAGE IA
+    # --------------------------------------------------
+    modele_df = resultats_df.dropna(subset=["Defaut_Réel"])
+    if len(modele_df) >= 5:
         st.markdown("---")
-        st.subheader("📊 Calage Fin & Analyse du Spectre Vibratoire")
-        
-        ensemble = st.selectbox("Sélectionner une machine à analyser en détail :", resultats_triés["Ensemble"])
-        
-        st.write("**🕹️ Commandes de recalage instantané au millième de Hz :**")
-        c_btn1, c_btn2, c_btn3, c_btn4, c_btn5 = st.columns([1, 1, 2, 1, 1])
-        
-        if c_btn1.button("⏪ - 0.010 Hz"):
-            st.session_state.micro_hz -= 0.010
-            st.rerun()
-        if c_btn2.button("◀️ - 0.001 Hz"):
-            st.session_state.micro_hz -= 0.001
-            st.rerun()
-        with c_btn3:
-            st.markdown(f"<h4 style='text-align: center; color: #19D3F3;'>Décalage : {st.session_state.micro_hz:+.3f} Hz</h4>", unsafe_allow_html=True)
-        if c_btn4.button("▶️ + 0.001 Hz"):
-            st.session_state.micro_hz += 0.001
-            st.rerun()
-        if c_btn5.button("⏩ + 0.010 Hz"):
-            st.session_state.micro_hz += 0.010
-            st.rerun()
+        st.subheader("🤖 Apprentissage IA")
+        features = ["Amp Cible (Bande)", "Entropie", "E0_5", "E10_20", "IDM3", "ID_Modulation", "IDM_Modulation_4X"]
+        features_ok = [f for f in features if f in modele_df.columns]
+        X = modele_df[features_ok]
+        y = modele_df["Defaut_Réel"]
+        model = RandomForestRegressor(n_estimators=300, random_state=42)
+        model.fit(X, y)
+        resultats_df["Prédiction IA"] = model.predict(resultats_df[features_ok])
+        st.dataframe(
+            resultats_df[["Ensemble", "Defaut_Réel", "Prédiction IA", "IDM3", "IDM_Modulation_4X"]].dropna(subset=["Defaut_Réel"]),
+            hide_index=True, use_container_width=True
+        )
+        st.caption("⚠️ Modèle indicatif — fiabilité limitée avec peu d'échantillons. Interprétation à croiser avec l'analyse fréquentielle.")
 
-        # Récupération des données spectrales spécifiques
-        freq, amp = fft_data[ensemble]
-        fft_df = pd.DataFrame({"Fréquence (Hz)": freq, "Amplitude": amp})
-        ligne_machine = resultats[resultats["Ensemble"] == ensemble].iloc[0]
+    # --------------------------------------------------
+    # EXPORT
+    # --------------------------------------------------
+    st.markdown("---")
+    sortie_bytes = BytesIO()
+    with pd.ExcelWriter(sortie_bytes, engine="openpyxl") as writer:
+        resultats_df.to_excel(writer, index=False, sheet_name="Synthese_Totale")
 
-        st.write("**Amplitudes lues aux repères actuels :**")
-        cols_f = st.columns(6)
-        noms_p = [
-            "Rotation Moteur", "Rotation Poulie 15d", 
-            "Engrènement (15d/50d)", "Harmonique Engrènement 4X", 
-            "Défilement Courroie", "Rotation Sortie (50d)"
-        ]
-        for idx, nom in enumerate(noms_p):
-            cols_f[idx].metric(label=f"{nom} ({freqs_meca[nom]:.3f} Hz)", value=f"{ligne_machine[f'Amp_{nom}']:.4f} V")
+        # Feuille de calage détaillée
+        rows_cal = []
+        for feuille, calage in calage_data.items():
+            if "error" in calage:
+                continue
+            for nom_elem, res in calage["identification"].items():
+                rows_cal.append({
+                    "Machine":         feuille,
+                    "Composante":      nom_elem,
+                    "f_theorique_Hz":  res["f_theorique"],
+                    "f_trouvee_Hz":    res["f_trouvee"] if res["found"] else None,
+                    "amplitude_u":     res["amplitude"] if res["found"] else None,
+                    "ecart_pct":       res["ecart_pct"],
+                    "confiance_pct":   res["confiance"],
+                    "ancre":           res["ancre"],
+                })
+        pd.DataFrame(rows_cal).to_excel(writer, index=False, sheet_name="Calage_Auto_Detail")
 
-        # Trace du Graphique FFT
-        fig = px.line(fft_df, x="Fréquence (Hz)", y="Amplitude", title=f"Spectre FFT — {ensemble}")
-        fig.update_xaxes(range=[0, 20])
-        
-        couleurs = {
-            "Rotation Moteur": "#EF553B", "Rotation Poulie 15d": "#00CC96", "Engrènement (15d/50d)": "#AB63FA", 
-            "Harmonique Engrènement 4X": "#FFD700", "Défilement Courroie": "#19D3F3", "Rotation Sortie (50d)": "#FFA15A"
-        }
-        
-        for nom, f_val in freqs_meca.items():
-            if f_val <= 20:
-                fig.add_vline(x=f_val, line_dash="dash", line_color=couleurs[nom], annotation_text=nom)
-        st.plotly_chart(fig, use_container_width=True)
+    st.download_button(
+        label="📥 Télécharger le registre complet (.xlsx)",
+        data=sortie_bytes.getvalue(),
+        file_name="Registre_Vibratoire_Calage_Auto.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
-        # ------------------------------------------
-        # LEXIQUE ET DÉFINITIONS INTERACTIFS
-        # ------------------------------------------
-        with st.expander("💡 Aide à l'interprétation : À quoi correspondent les fréquences lues ?"):
-            st.markdown(f"""
-            Chaque ligne pointillée tracée automatiquement sur votre graphique Plotly correspond à une réalité physique :
-            
-            * **🔴 Rotation Moteur ({freqs_meca['Rotation Moteur']:.2f} Hz) :** Vitesse brute de l'arbre d'entrée. Un pic anormal traduit un **balourd** ou un **désalignement** mécanique direct.
-            * **🟢 Rotation Poulie 15d ({freqs_meca['Rotation Poulie 15d']:.3f} Hz) :** Cycle de l'arbre primaire intermédiaire.
-            * **🟣 Engrènement ({freqs_meca['Engrènement (15d/50d)']:.2f} Hz) :** Rythme normal de contact entre les dents.
-            * **🟡 Harmonique Engrènement 4X ({freqs_meca['Harmonique Engrènement 4X']:.2f} Hz) — ÉTAT CIBLE B :** Notre cible d'étude. Un dépassement fort confirme un **matage de denture** ou un désalignement critique sous forte charge.
-            * **🔵 Défilement Courroie ({freqs_meca['Défilement Courroie']:.3f} Hz) :** Fréquence propre de la courroie. Signale une hernie ou une fêlure localisée.
-            * **🟠 Rotation Sortie ({freqs_meca['Rotation Sortie (50d)']:.3f} Hz) :** Vitesse ultra-lente de l'axe entraînant votre convoyeur ou récepteur.
-            
-            ⚠️ **Note de diagnostic (Zone des 16 Hz) :** Si vous observez l'apparition d'énergie inhabituelle stable aux alentours de **16,00 Hz**, il ne s'agit pas d'un défaut d'engrènement classique, mais d'une **anomalie magnétique/électrique du moteur** (ex: défaut de barres de rotor) ou d'un **bruit de frottement à large bande** (perte d'huile, roulement endommagé).
-            """)
-
-        # ------------------------------------------
-        # APPRENTISSAGE IA
-        # ------------------------------------------
-        modele_df = resultats_triés.dropna(subset=["Defaut_Réel"])
-
-        if len(modele_df) >= 5:
-            st.markdown("---")
-            st.subheader("🤖 Apprentissage IA (Toutes Caractéristiques)")
-            
-            features = ["Amp Cible (Bande)", "Entropie", "E0_5", "E10_20", "IDM3", "ID_Modulation", "IDM_Modulation_4X"]
-            X = modele_df[features]
-            y = modele_df["Defaut_Réel"]
-
-            model = RandomForestRegressor(n_estimators=300, random_state=42)
-            model.fit(X, y)
-
-            resultats_triés["Prédiction IA"] = model.predict(resultats_triés[features])
-
-            st.dataframe(
-                resultats_triés[["Ensemble", "Defaut_Réel", "Prédiction IA", "IDM3", "IDM_Modulation_4X"]].dropna(subset=["Defaut_Réel"]),
-                hide_index=True, use_container_width=True
-            )
-
-        # ------------------------------------------
-        # EXPORT DU REGISTRE TOTAL
-        # ------------------------------------------
-        st.markdown("---")
-        sortie = BytesIO()
-        with pd.ExcelWriter(sortie, engine="openpyxl") as writer:
-            resultats_triés.to_excel(writer, index=False, sheet_name="Synthese_Totale")
-        st.download_button(label="📥 Télécharger le registre complet (.xlsx)", data=sortie.getvalue(), file_name="Registre_Vibratoire_Total.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 else:
-    st.info("👋 Interface configurée pour l'État Cible B (3,32 Hz) avec lexique et seuils dynamiques sigma prêts.")
+    st.info("""
+    👋 **Interface prête — Calage automatique activé**
+
+    Le système va :
+    1. **Ancrer** sur le pic dominant de la sortie (~1 rpm) — la variable la plus robuste
+    2. **Remonter** toute la chaîne cinématique par les rapports configurés
+    3. **Identifier** chaque fréquence dans le spectre réel avec un score de confiance
+    4. **Diagnostiquer** automatiquement les anomalies (4X, courroie, moteur)
+
+    Configurez vos cinématiques dans la barre latérale, puis importez votre fichier Excel.
+    """)
