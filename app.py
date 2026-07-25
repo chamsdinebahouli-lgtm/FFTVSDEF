@@ -122,10 +122,11 @@ if uploaded_file is not None:
         st.subheader("📈 Représentation Graphique des Vibrations")
 
         # 2. Onglets de visualisation Plotly
-        tab1, tab2 = st.tabs(
+        tab1, tab2, tab3 = st.tabs(
             [
                 "📊 Barres Empilées (Niveau Cumulé)",
-                "📶 Barres Groupées (Par Organe)",
+                "📶 Barres Groupées (Tous les Organes)",
+                "🔍 Comparaison Ciblée (Sélecteur d'Organe)",
             ]
         )
 
@@ -150,9 +151,7 @@ if uploaded_file is not None:
             st.plotly_chart(fig_stacked, use_container_width=True)
 
         with tab2:
-            st.markdown(
-                "#### Comparaison de l'état vibratoire par type d'organe"
-            )
+            st.markdown("#### Comparaison globale de tous les organes")
             fig_grouped = px.bar(
                 df_melted,
                 x="Système",
@@ -167,6 +166,56 @@ if uploaded_file is not None:
                 legend_title="Organe Mécanique",
             )
             st.plotly_chart(fig_grouped, use_container_width=True)
+
+        with tab3:
+            st.markdown("#### Focus par Organe Mécanique / Module")
+
+            # Sélecteur de composant
+            composants_disponibles = ["Tous les composants"] + cols_composants
+            composant_selectionne = st.selectbox(
+                "Sélectionner le module à analyser :",
+                options=composants_disponibles,
+                index=0,
+            )
+
+            if composant_selectionne == "Tous les composants":
+                df_filtre = df_melted
+                titre_graph = (
+                    "Comparaison Globale - Tous les Organes Kinématiques"
+                )
+            else:
+                df_filtre = df_melted[
+                    df_melted["Composant Kinématique"] == composant_selectionne
+                ]
+                titre_graph = f"Analyse Vibratoire Ciblée : {composant_selectionne}"
+
+            fig_single = px.bar(
+                df_filtre,
+                x="Système",
+                y="Amplitude (V)",
+                color=(
+                    "Composant Kinématique"
+                    if composant_selectionne == "Tous les composants"
+                    else None
+                ),
+                title=titre_graph,
+                text_auto=(
+                    ".4f"
+                    if composant_selectionne != "Tous les composants"
+                    else False
+                ),
+                barmode="group",
+            )
+            fig_single.update_layout(
+                xaxis_title="Système / Machine",
+                yaxis_title="Amplitude Vibratoire (V)",
+                showlegend=(
+                    True
+                    if composant_selectionne == "Tous les composants"
+                    else False
+                ),
+            )
+            st.plotly_chart(fig_single, use_container_width=True)
 
     except Exception as e:
         st.error(f"Erreur lors du traitement du fichier : {e}")
