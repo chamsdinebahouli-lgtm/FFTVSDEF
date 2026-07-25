@@ -1,31 +1,232 @@
 """
 app.py
 ------
-Interface Streamlit de l'analyseur vibratoire FFT.
+Analyseur Vibratoire FFT - Application Streamlit (fichier unique).
 
-Ce fichier ne contient que la logique d'affichage : tout le calcul est
-délégué au package `vibration_analysis` (voir fft_core.py / io_utils.py),
-qui est testé indépendamment (cf. tests/).
+Toute la logique (calcul FFT, lecture Excel, interface) est regroupée ici
+volontairement pour simplifier le déploiement : aucun import local, donc
+aucun risque d'erreur "ModuleNotFoundError" liée à l'organisation des
+fichiers sur GitHub / Streamlit Cloud.
 """
 
-import logging
+from __future__ import annotations
 
+import io
+import logging
+from dataclasses import dataclass
+from enum import Enum
+
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-
-from vibration_analysis import (
-    DonneesInsuffisantesError,
-    ModeFFT,
-    UniteTemps,
-    analyser_systeme,
-    charger_systemes,
-)
+from scipy.fft import rfft, rfftfreq
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-# --- Fréquences d'intérêt et leurs organes associés ---
+
+# =============================================================================
+# LOGIQUE MÉTIER : calcul FFT et extraction d'amplitudes
+# =============================================================================
+
+
+class ModeFFT(str, Enum):
+    """Méthode de calcul de la FFT."""
+
+    ANCIEN = "ancien"  # Sans fenêtre, lecture au point fréquentiel le plus proche
+    NOUVEAU = "nouveau"  # Fenêtre de Hanning, recherche du pic local ±3 %
+
+    @classmethod
+    def from_label_ui(cls, label: str) -> "ModeFFT":
+        return cls.ANCIEN if label.startswith("Ancien") else cls.NOUVEAU
+
+
+class UniteTemps(str, Enum):
+    """Unité de la colonne temps dans le fichier source."""
+
+    MILLISECONDES = "ms"
+    SECONDES = "s"
+
+
+@dataclass(frozen=True)
+class ResultatFFT:
+    """Résultat d'un calcul FFT sur un signal."""
+
+    freq: np.ndarray
+    amplitude: np.ndarray
+    dt: float
+    resolution_hz: float
+    n_points: int
+
+
+class DonneesInsuffisantesError(ValueError):
+    """Levée quand un signal est trop court ou dégénéré pour être analysé."""
+
+
+class OngletInvalideError(ValueError):
+    """Levée quand un onglet Excel n'a pas le format attendu (temps, signal)."""
+
+
+def detecter_dt(temps: np.ndarray, unite: UniteTemps = UniteTemps.MILLISECONDES) -> float:
+    """Détecte le pas d'échantillonnage (dt) en secondes à partir d'une colonne temps."""
+    diffs = np.diff(temps.astype(float))
+    diffs_pos = diffs[diffs > 0]
+    if len(diffs_pos) == 0:
+        raise DonneesInsuffisantesError(
+            "Impossible de déterminer le pas d'échantillonnage : "
+            "la colonne temps ne contient pas d'intervalles positifs."
+        )
+    facteur = 1000.0 if unite == UniteTemps.MILLISECONDES else 1.0
+    return float(np.median(diffs_pos) / facteur)
+
+
+def calculer_fft(signal: np.ndarray, dt: float, mode: ModeFFT) -> ResultatFFT:
+    """Calcule le spectre d'amplitude (FFT) d'un signal temporel."""
+    x = np.asarray(signal, dtype=float)
+    x = x[~np.isnan(x)]
+    n = len(x)
+
+    if n < 2:
+        raise DonneesInsuffisantesError(
+            f"Signal trop court pour un calcul FFT (n={n} points valides)."
+        )
+    if dt <= 0:
+        raise DonneesInsuffisantesError(f"Pas d'échantillonnage invalide (dt={dt}).")
+
+    x_centre = x - np.mean(x)
+
+    if mode == ModeFFT.ANCIEN:
+        amplitude = np.abs(rfft(x_centre)) * (2.0 / n)
+    else:
+        fenetre = np.hanning(n)
+        amplitude = np.abs(rfft(x_centre * fenetre)) * (2.0 / np.sum(fenetre))
+
+    freq = rfftfreq(n, d=dt)
+    resolution_hz = 1.0 / (n * dt)
+
+    return ResultatFFT(
+        freq=freq, amplitude=amplitude, dt=dt, resolution_hz=resolution_hz, n_points=n
+    )
+
+
+def extraire_amplitude(
+    resultat: ResultatFFT,
+    freq_cible: float,
+    mode: ModeFFT,
+    tolerance_relative: float = 0.03,
+) -> float:
+    """Extrait l'amplitude vibratoire à une fréquence cible donnée."""
+    freq, amp = resultat.freq, resultat.amplitude
+
+    if mode == ModeFFT.ANCIEN:
+        idx = int(np.argmin(np.abs(freq - freq_cible)))
+        return float(amp[idx])
+
+    f_min = freq_cible * (1 - tolerance_relative)
+    f_max = freq_cible * (1 + tolerance_relative)
+    mask = (freq >= f_min) & (freq <= f_max)
+
+    if np.any(mask):
+        return float(np.max(amp[mask]))
+
+    idx = int(np.argmin(np.abs(freq - freq_cible)))
+    return float(amp[idx])
+
+
+def resolution_suffisante(
+    resultat: ResultatFFT, freq_cible: float, tolerance_relative: float = 0.03
+) -> bool:
+    """Vérifie que la résolution fréquentielle permet de distinguer une fréquence cible."""
+    largeur_fenetre = 2 * freq_cible * tolerance_relative
+    return largeur_fenetre >= 2 * resultat.resolution_hz
+
+
+def analyser_systeme(
+    df: pd.DataFrame,
+    col_temps: str,
+    col_signal: str,
+    mode: ModeFFT,
+    freqs_cibles: dict[str, float],
+    unite_temps: UniteTemps = UniteTemps.MILLISECONDES,
+) -> dict:
+    """Pipeline complet pour un système (un onglet Excel)."""
+    dt = detecter_dt(df[col_temps].values, unite=unite_temps)
+    resultat = calculer_fft(df[col_signal].values, dt=dt, mode=mode)
+
+    amplitudes: dict[str, float] = {}
+    alertes_resolution: list[str] = []
+
+    for nom_composant, f_cible in freqs_cibles.items():
+        amplitudes[nom_composant] = extraire_amplitude(resultat, f_cible, mode)
+        if mode == ModeFFT.NOUVEAU and not resolution_suffisante(resultat, f_cible):
+            alertes_resolution.append(nom_composant)
+
+    valeurs = list(amplitudes.values())
+
+    return {
+        "amplitudes": amplitudes,
+        "somme": float(np.sum(valeurs)),
+        "produit": float(np.prod(valeurs)),
+        "dt": resultat.dt,
+        "resolution_hz": resultat.resolution_hz,
+        "n_points": resultat.n_points,
+        "alertes_resolution": alertes_resolution,
+    }
+
+
+def lire_onglet(xls: pd.ExcelFile, nom_onglet: str) -> pd.DataFrame:
+    """Lit un onglet et vérifie qu'il contient au minimum deux colonnes exploitables."""
+    df = pd.read_excel(xls, sheet_name=nom_onglet)
+    df.columns = [str(c).strip() for c in df.columns]
+
+    if len(df.columns) < 2:
+        raise OngletInvalideError(
+            f"L'onglet '{nom_onglet}' contient moins de 2 colonnes exploitables."
+        )
+
+    col_temps = df.columns[0]
+    if not pd.api.types.is_numeric_dtype(df[col_temps]):
+        raise OngletInvalideError(
+            f"L'onglet '{nom_onglet}' : la première colonne "
+            f"('{col_temps}') n'est pas numérique, impossible de l'utiliser "
+            "comme axe temps."
+        )
+
+    return df
+
+
+def charger_systemes(uploaded_file) -> tuple[list[dict], list[str]]:
+    """Parcourt tous les onglets d'un fichier Excel, isole les onglets valides des invalides."""
+    xls = pd.ExcelFile(uploaded_file)
+    systemes: list[dict] = []
+    erreurs: list[str] = []
+
+    for nom_onglet in xls.sheet_names:
+        try:
+            df = lire_onglet(xls, nom_onglet)
+            systemes.append(
+                {
+                    "nom": nom_onglet,
+                    "df": df,
+                    "col_temps": df.columns[0],
+                    "col_signal": df.columns[1],
+                }
+            )
+        except OngletInvalideError as exc:
+            logger.warning("Onglet ignoré : %s", exc)
+            erreurs.append(str(exc))
+        except Exception as exc:
+            logger.exception("Erreur inattendue sur l'onglet '%s'", nom_onglet)
+            erreurs.append(f"Onglet '{nom_onglet}' : erreur inattendue ({exc}).")
+
+    return systemes, erreurs
+
+
+# =============================================================================
+# INTERFACE STREAMLIT
+# =============================================================================
+
 FREQS_CIBLES = {
     "Porte (0.0167 Hz)": 0.016759,
     "1er étage réducteur (3.68 Hz)": 3.68,
@@ -37,7 +238,6 @@ st.set_page_config(page_title="Analyse Vibratoire FFT & Stats", layout="wide")
 st.title("📊 Analyseur Vibratoire FFT - Visualisation Dynamique & Statistiques")
 st.write("Calcul FFT, classement dynamique et indicateurs statistiques de maintenance.")
 
-# --- SIDEBAR - CONFIGURATION ---
 st.sidebar.header("⚙️ Paramètres")
 
 mode_label = st.sidebar.radio(
@@ -72,13 +272,6 @@ uploaded_file = st.sidebar.file_uploader("Importer le fichier Excel (.xlsx)", ty
 
 @st.cache_data(show_spinner=False)
 def _analyser_fichier(file_bytes: bytes, mode_value: str, unite_value: str):
-    """
-    Wrapper cachable : Streamlit ne peut pas hasher un mode_calcul/unite_temps
-    enum directement dans tous les cas, donc on passe des primitives et on
-    reconstruit les enums à l'intérieur.
-    """
-    import io
-
     mode = ModeFFT(mode_value)
     unite = UniteTemps(unite_value)
 
@@ -117,7 +310,6 @@ if uploaded_file is not None:
         st.error("Aucun onglet exploitable n'a été trouvé dans ce fichier.")
         st.stop()
 
-    # Alerte résolution fréquentielle
     alertes_globales = {
         r["nom"]: r["alertes_resolution"] for r in resultats if r["alertes_resolution"]
     }
@@ -131,7 +323,6 @@ if uploaded_file is not None:
             for nom, composants in alertes_globales.items():
                 st.write(f"- **{nom}** : {', '.join(composants)}")
 
-    # --- Construction du tableau de résultats ---
     lignes = []
     for r in resultats:
         ligne = {"Système": r["nom"], **{k: round(v, 6) for k, v in r["amplitudes"].items()}}
