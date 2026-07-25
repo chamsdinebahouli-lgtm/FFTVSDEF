@@ -9,9 +9,9 @@ st.set_page_config(
     page_title="Analyse Vibratoire FFT & Graphiques", layout="wide"
 )
 
-st.title("📊 Analyseur Vibratoire FFT & Visualisation par Composant")
+st.title("📊 Analyseur Vibratoire FFT & Visualisation Dynamique")
 st.write(
-    "Calcul FFT et décomposition par organe mécanique (Porte, Réducteur, Moteur)."
+    "Calcul FFT, classement dynamique par niveau vibratoire et décomposition par organe."
 )
 
 # --- SIDEBAR - CONFIGURATION ---
@@ -109,7 +109,7 @@ if uploaded_file is not None:
         st.subheader("📋 Tableau Synthétique des Amplitudes")
         st.dataframe(df_res, use_container_width=True)
 
-        # Transformation des données pour la visualisation
+        # Transformation des données pour Plotly
         cols_composants = list(freqs_cibles.keys())
         df_melted = df_res.melt(
             id_vars=["Système"],
@@ -119,29 +119,35 @@ if uploaded_file is not None:
         )
 
         st.markdown("---")
-        st.subheader("📈 Représentation Graphique des Vibrations")
+        st.subheader("📈 Visualisation Dynamique (Classée du min au max)")
+
+        # Ordre des systèmes du plus faible au plus fort selon le total (Somme V)
+        ordre_systemes_global = df_res.sort_values(
+            by="Somme (V)", ascending=True
+        )["Système"].tolist()
 
         # 2. Onglets de visualisation Plotly
         tab1, tab2, tab3 = st.tabs(
             [
-                "📊 Barres Empilées (Niveau Cumulé)",
-                "📶 Barres Groupées (Tous les Organes)",
-                "🔍 Comparaison Ciblée (Sélecteur d'Organe)",
+                "📊 Barres Empilées (Ordre par Cumul)",
+                "📶 Barres Groupées (Ordre par Cumul)",
+                "🔍 Focus Organe (Rangement Dynamique)",
             ]
         )
 
         with tab1:
             st.markdown(
-                "#### Contribution de chaque organe à l'amplitude globale"
+                "#### Contribution de chaque organe (Rangement par Amplitude Cumulée Croissante)"
             )
             fig_stacked = px.bar(
                 df_melted,
                 x="Système",
                 y="Amplitude (V)",
                 color="Composant Kinématique",
-                title="Amplitude Vibratoire Cumulée par Machine",
+                title="Amplitude Cumulée (Classée du plus faible au plus fort)",
                 barmode="stack",
                 text_auto=".3f",
+                category_orders={"Système": ordre_systemes_global},
             )
             fig_stacked.update_layout(
                 xaxis_title="Système / Machine",
@@ -151,14 +157,17 @@ if uploaded_file is not None:
             st.plotly_chart(fig_stacked, use_container_width=True)
 
         with tab2:
-            st.markdown("#### Comparaison globale de tous les organes")
+            st.markdown(
+                "#### Comparaison de tous les organes (Rangement par Niveau Global)"
+            )
             fig_grouped = px.bar(
                 df_melted,
                 x="Système",
                 y="Amplitude (V)",
                 color="Composant Kinématique",
-                title="Amplitudes Vibratoires par Composant",
+                title="Amplitudes Vibratoires par Composant (Classées par Somme globale)",
                 barmode="group",
+                category_orders={"Système": ordre_systemes_global},
             )
             fig_grouped.update_layout(
                 xaxis_title="Système / Machine",
@@ -168,7 +177,7 @@ if uploaded_file is not None:
             st.plotly_chart(fig_grouped, use_container_width=True)
 
         with tab3:
-            st.markdown("#### Focus par Organe Mécanique / Module")
+            st.markdown("#### Focus Dynamique par Organe Mécanique")
 
             # Sélecteur de composant
             composants_disponibles = ["Tous les composants"] + cols_composants
@@ -180,14 +189,17 @@ if uploaded_file is not None:
 
             if composant_selectionne == "Tous les composants":
                 df_filtre = df_melted
-                titre_graph = (
-                    "Comparaison Globale - Tous les Organes Kinématiques"
-                )
+                ordre_dynamique = ordre_systemes_global
+                titre_graph = "Comparaison Globale - Classée par Cumul Total"
             else:
                 df_filtre = df_melted[
                     df_melted["Composant Kinématique"] == composant_selectionne
                 ]
-                titre_graph = f"Analyse Vibratoire Ciblée : {composant_selectionne}"
+                # Tri dynamique basé sur la valeur du composant choisi
+                ordre_dynamique = df_filtre.sort_values(
+                    by="Amplitude (V)", ascending=True
+                )["Système"].tolist()
+                titre_graph = f"Classement du plus faible au plus fort : {composant_selectionne}"
 
             fig_single = px.bar(
                 df_filtre,
@@ -205,6 +217,7 @@ if uploaded_file is not None:
                     else False
                 ),
                 barmode="group",
+                category_orders={"Système": ordre_dynamique},
             )
             fig_single.update_layout(
                 xaxis_title="Système / Machine",
