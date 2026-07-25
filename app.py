@@ -1,17 +1,20 @@
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 from scipy.fft import rfft, rfftfreq
 import streamlit as st
 
 # Configuration de la page
 st.set_page_config(
-    page_title="Analyse Vibratoire FFT & Graphiques", layout="wide"
+    page_title="Analyse Vibratoire FFT & Stats", layout="wide"
 )
 
-st.title("📊 Analyseur Vibratoire FFT & Visualisation Dynamique")
+st.title(
+    "📊 Analyseur Vibratoire FFT - Visualisation Dynamique & Statistiques"
+)
 st.write(
-    "Calcul FFT, classement dynamique par niveau vibratoire et décomposition par organe."
+    "Calcul FFT, classement dynamique et indicateurs statistiques de maintenance."
 )
 
 # --- SIDEBAR - CONFIGURATION ---
@@ -22,6 +25,14 @@ mode_calcul = st.sidebar.radio(
         "Ancien Mode (Sans fenêtre, point fixe)",
         "Nouveau Mode (Hanning, pic local ±3%)",
     ],
+)
+
+# Option pour afficher ou non les seuils statistiques sur les graphiques
+st.sidebar.markdown("---")
+st.sidebar.header("📊 Indicateurs Statistiques")
+afficher_moyenne = st.sidebar.checkbox("Afficher la Ligne de Moyenne", value=True)
+afficher_seuil = st.sidebar.checkbox(
+    "Afficher le Seuil d'Alerte (Moyenne + 1 Écart-type)", value=True
 )
 
 uploaded_file = st.sidebar.file_uploader(
@@ -49,10 +60,8 @@ def calculer_fft(df, col_temps, col_signal, mode):
     x_centered = x - np.mean(x)
 
     if mode.startswith("Ancien"):
-        # Sans fenêtrage (Rectangulaire)
         fft_amp = np.abs(rfft(x_centered)) * (2.0 / N)
     else:
-        # Fenêtre de Hanning
         fenetre = np.hanning(N)
         fft_amp = np.abs(rfft(x_centered * fenetre)) * (2.0 / np.sum(fenetre))
 
@@ -62,11 +71,9 @@ def calculer_fft(df, col_temps, col_signal, mode):
 
 def extraire_amplitude(freq, amp, f_cible, mode):
     if mode.startswith("Ancien"):
-        # Index de la fréquence théorique la plus proche
         idx = np.argmin(np.abs(freq - f_cible))
         return amp[idx]
     else:
-        # Recherche du maximum dans la plage ±3%
         f_min, f_max = f_cible * 0.97, f_cible * 1.03
         mask = (freq >= f_min) & (freq <= f_max)
         if np.any(mask):
@@ -119,14 +126,13 @@ if uploaded_file is not None:
         )
 
         st.markdown("---")
-        st.subheader("📈 Visualisation Dynamique (Classée du min au max)")
+        st.subheader("📈 Visualisation Dynamique & Indicateurs Statistiques")
 
-        # Ordre des systèmes du plus faible au plus fort selon le total (Somme V)
         ordre_systemes_global = df_res.sort_values(
             by="Somme (V)", ascending=True
         )["Système"].tolist()
 
-        # 2. Onglets de visualisation Plotly
+        # Onglets de visualisation
         tab1, tab2, tab3 = st.tabs(
             [
                 "📊 Barres Empilées (Ordre par Cumul)",
@@ -137,18 +143,40 @@ if uploaded_file is not None:
 
         with tab1:
             st.markdown(
-                "#### Contribution de chaque organe (Rangement par Amplitude Cumulée Croissante)"
+                "#### Contribution de chaque organe (Tri par Cumul Croissant)"
             )
             fig_stacked = px.bar(
                 df_melted,
                 x="Système",
                 y="Amplitude (V)",
                 color="Composant Kinématique",
-                title="Amplitude Cumulée (Classée du plus faible au plus fort)",
+                title="Amplitude Cumulée par Machine",
                 barmode="stack",
                 text_auto=".3f",
                 category_orders={"Système": ordre_systemes_global},
             )
+
+            # Ajout indicateurs stats sur Somme
+            moy_somme = df_res["Somme (V)"].mean()
+            std_somme = df_res["Somme (V)"].std()
+
+            if afficher_moyenne:
+                fig_stacked.add_hline(
+                    y=moy_somme,
+                    line_dash="dash",
+                    line_color="blue",
+                    annotation_text=f"Moyenne globale: {moy_somme:.4f}V",
+                    annotation_position="bottom right",
+                )
+            if afficher_seuil:
+                fig_stacked.add_hline(
+                    y=moy_somme + std_somme,
+                    line_dash="dot",
+                    line_color="red",
+                    annotation_text=f"Seuil Alerte (Moy+σ): {moy_somme + std_somme:.4f}V",
+                    annotation_position="top right",
+                )
+
             fig_stacked.update_layout(
                 xaxis_title="Système / Machine",
                 yaxis_title="Amplitude Cumulée (V)",
@@ -158,28 +186,22 @@ if uploaded_file is not None:
 
         with tab2:
             st.markdown(
-                "#### Comparaison de tous les organes (Rangement par Niveau Global)"
+                "#### Comparaison de tous les organes (Tri par Niveau Global)"
             )
             fig_grouped = px.bar(
                 df_melted,
                 x="Système",
                 y="Amplitude (V)",
                 color="Composant Kinématique",
-                title="Amplitudes Vibratoires par Composant (Classées par Somme globale)",
+                title="Amplitudes Vibratoires par Composant",
                 barmode="group",
                 category_orders={"Système": ordre_systemes_global},
-            )
-            fig_grouped.update_layout(
-                xaxis_title="Système / Machine",
-                yaxis_title="Amplitude (V)",
-                legend_title="Organe Mécanique",
             )
             st.plotly_chart(fig_grouped, use_container_width=True)
 
         with tab3:
             st.markdown("#### Focus Dynamique par Organe Mécanique")
 
-            # Sélecteur de composant
             composants_disponibles = ["Tous les composants"] + cols_composants
             composant_selectionne = st.selectbox(
                 "Sélectionner le module à analyser :",
@@ -191,15 +213,16 @@ if uploaded_file is not None:
                 df_filtre = df_melted
                 ordre_dynamique = ordre_systemes_global
                 titre_graph = "Comparaison Globale - Classée par Cumul Total"
+                valeurs_stats = df_res["Somme (V)"]
             else:
                 df_filtre = df_melted[
                     df_melted["Composant Kinématique"] == composant_selectionne
                 ]
-                # Tri dynamique basé sur la valeur du composant choisi
                 ordre_dynamique = df_filtre.sort_values(
                     by="Amplitude (V)", ascending=True
                 )["Système"].tolist()
                 titre_graph = f"Classement du plus faible au plus fort : {composant_selectionne}"
+                valeurs_stats = df_filtre["Amplitude (V)"]
 
             fig_single = px.bar(
                 df_filtre,
@@ -219,6 +242,29 @@ if uploaded_file is not None:
                 barmode="group",
                 category_orders={"Système": ordre_dynamique},
             )
+
+            # Ajout indicateurs stats spécifiques au focus sélectionné
+            if len(valeurs_stats) > 0:
+                moy_comp = valeurs_stats.mean()
+                std_comp = valeurs_stats.std()
+
+                if afficher_moyenne:
+                    fig_single.add_hline(
+                        y=moy_comp,
+                        line_dash="dash",
+                        line_color="blue",
+                        annotation_text=f"Moyenne: {moy_comp:.4f}V",
+                        annotation_position="bottom right",
+                    )
+                if afficher_seuil and not pd.isna(std_comp):
+                    fig_single.add_hline(
+                        y=moy_comp + std_comp,
+                        line_dash="dot",
+                        line_color="red",
+                        annotation_text=f"Alerte (Moy+σ): {moy_comp + std_comp:.4f}V",
+                        annotation_position="top right",
+                    )
+
             fig_single.update_layout(
                 xaxis_title="Système / Machine",
                 yaxis_title="Amplitude Vibratoire (V)",
