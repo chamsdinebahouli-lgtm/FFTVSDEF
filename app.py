@@ -3,16 +3,15 @@ import pandas as pd
 from scipy.fft import rfft, rfftfreq
 import streamlit as st
 
-# Configuration de la page Streamlit
 st.set_page_config(page_title="Analyse FFT Corrigée", layout="wide")
 
 st.title("📊 Analyseur FFT de Signal")
 st.write(
-    "Chargez votre fichier Excel pour calculer les spectre FFT avec correction automatique du temps."
+    "Chargez votre fichier Excel pour calculer les spectres FFT, les fréquences cibles ainsi que la somme et le produit de leurs amplitudes."
 )
 
 
-# --- FONCTIONS DE CALCUL FFT ---
+# --- FONCTIONS FFT ---
 def calculer_fft_signal(df, col_temps, col_signal, dt_force=None):
     x = df[col_signal].values.astype(float)
     N = len(x)
@@ -23,7 +22,7 @@ def calculer_fft_signal(df, col_temps, col_signal, dt_force=None):
     if dt_force is not None and dt_force > 0:
         dt = float(dt_force)
     else:
-        # Correction des saut arrières/reset d'horloge
+        # Correction des réinitialisations de l'axe temps
         diffs = np.diff(df[col_temps].values.astype(float))
         diffs_positives = diffs[diffs > 0]
 
@@ -63,14 +62,12 @@ def obtenir_amplitude_a_frequence(freq, amp, target_hz, tol_pct=0.03):
 
 
 # --- INTERFACE STREAMLIT ---
-
-# 1. Barre latérale : upload du fichier
 st.sidebar.header("Paramètres")
 uploaded_file = st.sidebar.file_uploader(
     "Importer un fichier Excel (.xlsx)", type=["xlsx", "xls"]
 )
 
-# Configuration des fréquences cibles à analyser
+# Fréquences cibles à rechercher
 freqs_cibles = {
     "Amplitude 0,016759 Hz": 0.016759,
     "Amplitude 3,68 Hz": 3.68,
@@ -80,11 +77,9 @@ freqs_cibles = {
 
 if uploaded_file is not None:
     try:
-        # Lecture du fichier uploadé directement en mémoire
         xls = pd.ExcelFile(uploaded_file)
         resultats = []
 
-        # Barre de progression Streamlit
         progress_bar = st.progress(0)
         num_sheets = len(xls.sheet_names)
 
@@ -110,27 +105,37 @@ if uploaded_file is not None:
                 "Durée Totale (s)": round(len(df) * dt, 2),
             }
 
+            amplitudes_extraites = []
             for label, f_cible in freqs_cibles.items():
                 _, amp_val = obtenir_amplitude_a_frequence(freq, amp, f_cible)
                 ligne_res[label] = round(amp_val, 6)
+                amplitudes_extraites.append(amp_val)
+
+            # Calcul de la somme et du produit des amplitudes cibles
+            produit_amp = np.prod(amplitudes_extraites)
+            somme_amp = np.sum(amplitudes_extraites)
+
+            ligne_res["Produit des Fréquences"] = f"{produit_amp:.4e}"
+            ligne_res["Somme des Fréquences"] = round(somme_amp, 6)
 
             resultats.append(ligne_res)
             progress_bar.progress((i + 1) / num_sheets)
 
         progress_bar.empty()
 
-        # Affichage du tableau interactif sous Streamlit
         df_resultats = pd.DataFrame(resultats)
 
-        st.subheader("📋 Synthèse des amplitudes FFT calculées")
+        st.subheader(
+            "📋 Synthèse des amplitudes FFT (avec Produit & Somme)"
+        )
         st.dataframe(df_resultats, use_container_width=True)
 
-        # Option de téléchargement au format CSV ou Excel
+        # Export CSV
         csv = df_resultats.to_csv(index=False).encode("utf-8")
         st.download_button(
             label="💾 Télécharger les résultats (CSV)",
             data=csv,
-            file_name="resultats_fft.csv",
+            file_name="resultats_fft_complets.csv",
             mime="text/csv",
         )
 
