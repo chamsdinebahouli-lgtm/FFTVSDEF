@@ -29,13 +29,22 @@ def calcul_fft(df):
     freq = rfftfreq(N, d=dt)
     return freq, fft_amp
 
-def extract_amp(freq, amp, target_hz, tol_hz=0.05):
-    """Extrait l'amplitude maximale dans une bande de tolérance autour de la cible."""
+def extract_amp(freq, amp, target_hz, tol_pct=0.05):
+    """Extrait l'amplitude maximale dans une bande de tolérance en % autour de la cible."""
+    # Calcul de la fenêtre de tolérance dynamique
+    tol_hz = target_hz * tol_pct
     fmin, fmax = target_hz - tol_hz, target_hz + tol_hz
+    
+    # Sécurité absolue : on empêche de descendre à 0 Hz (composante continue)
+    fmin = max(0.005, fmin) 
+
     mask = (freq >= fmin) & (freq <= fmax)
+    
     if np.any(mask):
+        # On renvoie le pic maximum trouvé DANS la fenêtre
         return float(np.max(amp[mask]))
-    # Si rien n'est trouvé dans la bande, on prend le point le plus proche
+    
+    # Sécurité si aucun point ne tombe dans la fenêtre (cas de très basse résolution)
     idx = np.argmin(np.abs(freq - target_hz))
     return float(amp[idx])
 
@@ -46,8 +55,13 @@ st.sidebar.header("🛠️ Configuration")
 uploaded_file = st.sidebar.file_uploader("1. Importer le fichier Excel (.xlsx)", type=["xlsx"])
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("🎯 Tolérance de recherche")
-tol_recherche = st.sidebar.number_input("Bande de tolérance (Hz) :", min_value=0.01, max_value=0.5, value=0.05, step=0.01)
+st.sidebar.subheader("🎯 Recherche Intelligente des Pics")
+# On utilise maintenant un pourcentage (ex: 2% = 0.02)
+tol_recherche_pct = st.sidebar.slider(
+    "Tolérance de recherche autour de la cible (%) :", 
+    min_value=0.5, max_value=10.0, value=3.0, step=0.5,
+    help="Le script cherchera le pic d'amplitude maximum dans cette plage. Ex: Pour 13.67 Hz à 3%, il cherche entre 13.26 Hz et 14.08 Hz."
+) / 100.0
 
 st.sidebar.markdown("---")
 notes_text = st.sidebar.text_area(
@@ -64,10 +78,8 @@ if uploaded_file:
     xls = pd.ExcelFile(uploaded_file)
     resultats = []
     
-    # Parsing des notes terrain (Défaut Réel)
     notes = {line.split("=")[0].strip(): float(line.split("=")[1].strip()) for line in notes_text.splitlines() if "=" in line}
 
-    # Fréquences cibles définies dans votre tableau
     FREQS_CIBLES = {
         "Amplitude à 0,0167 Hz": 0.0167,
         "Amplitude à 3,68 Hz (V)": 3.68,
@@ -75,7 +87,6 @@ if uploaded_file:
         "Amplitude à 13,67 Hz": 13.67
     }
 
-    # 1. Extraction des données par onglet
     for feuille in xls.sheet_names:
         try:
             df = pd.read_excel(uploaded_file, sheet_name=feuille)
@@ -84,18 +95,17 @@ if uploaded_file:
 
             freq, amp = calcul_fft(df)
 
-            # Création de la ligne de résultat
             res_row = {
                 "Système": feuille,
                 "Mean SUMOFDEF (1 year)": notes.get(feuille, np.nan)
             }
 
-            # Extraction dynamique pour chaque fréquence cible
             somme_freqs = 0.0
             produit_freqs = 1.0
             
             for col_name, f_cible in FREQS_CIBLES.items():
-                amp_val = extract_amp(freq, amp, f_cible, tol_hz=tol_recherche)
+                # Appel de la fonction avec la tolérance en pourcentage
+                amp_val = extract_amp(freq, amp, f_cible, tol_pct=tol_recherche_pct)
                 res_row[col_name] = amp_val
                 somme_freqs += amp_val
                 produit_freqs *= amp_val
@@ -108,24 +118,19 @@ if uploaded_file:
         except Exception as e:
             st.sidebar.error(f"Erreur d'analyse sur l'onglet {feuille} : {e}")
 
-    # 2. Construction du DataFrame final et calcul des corrélations
     if resultats:
         df_res = pd.DataFrame(resultats)
-        
-        # Isoler les lignes avec un 'Mean SUMOFDEF' valide pour calculer la corrélation
         df_valid = df_res.dropna(subset=["Mean SUMOFDEF (1 year)"])
         
-        # Préparation de la ligne de corrélation
         corr_row = {
             "Système": "Coef. de corrélation DEF vs..",
-            "Mean SUMOFDEF (1 year)": "" # Laissé vide pour cette ligne
+            "Mean SUMOFDEF (1 year)": "" 
         }
         
         colonnes_a_correler = list(FREQS_CIBLES.keys()) + ["Produit des Fréquences", "Somme des Fréquences"]
         
         if len(df_valid) >= 2:
             for col in colonnes_a_correler:
-                # Calcul de la corrélation de Pearson
                 corr = df_valid["Mean SUMOFDEF (1 year)"].corr(df_valid[col])
                 if pd.notna(corr):
                     corr_row[col] = f"{corr * 100:.2f}%"
@@ -135,23 +140,18 @@ if uploaded_file:
             for col in colonnes_a_correler:
                 corr_row[col] = "N/A"
 
-        # Formater les colonnes numériques avant d'ajouter la ligne de corrélation (pour la beauté de l'affichage)
         df_display = df_res.copy()
         
-        # Arrondir et formater en notation scientifique pour le produit
         df_display["Produit des Fréquences"] = df_display["Produit des Fréquences"].apply(lambda x: f"{x:.2E}")
         for col in FREQS_CIBLES.keys():
             df_display[col] = df_display[col].apply(lambda x: f"{x:.5f}")
         df_display["Somme des Fréquences"] = df_display["Somme des Fréquences"].apply(lambda x: f"{x:.5f}")
 
-        # Ajouter la ligne de corrélation à la fin
         df_display = pd.concat([df_display, pd.DataFrame([corr_row])], ignore_index=True)
 
-        # 3. Affichage
-        st.subheader("📊 Tableau de Synthèse et Corrélations")
+        st.subheader("📊 Tableau de Synthèse et Corrélations (Recherche sur Plages Flexibles)")
         st.dataframe(df_display, use_container_width=True, hide_index=True)
         
-        # Option pour télécharger les données en CSV
         csv = df_display.to_csv(index=False, sep=";").encode('utf-8')
         st.download_button(
             label="📥 Télécharger le tableau en CSV",
