@@ -1,163 +1,177 @@
-import streamlit as st
-import pandas as pd
 import numpy as np
+import pandas as pd
 from scipy.fft import rfft, rfftfreq
 
-# --------------------------------------------------
-# CONFIGURATION DE L'APPLICATION
-# --------------------------------------------------
-st.set_page_config(
-    page_title="Analyse FFT - Extracteur Multi-Fréquences",
-    layout="wide"
-)
 
-st.title("Extraction d'Amplitudes Spécifiques et Corrélations")
+def calculer_fft_signal(df, col_temps="ms", col_signal="V", dt_force=None):
+    """Calcule la FFT d'un signal en corrigeant automatiquement les réinitialisations
 
-# --------------------------------------------------
-# FONCTIONS FFT & SIGNAL
-# --------------------------------------------------
-def calcul_fft(df):
-    """FFT standard avec fenêtre de Hanning."""
-    t = df["ms"].values / 1000.0
-    x = df["V"].values.astype(float)
-    x = x - np.mean(x)
-    fenetre = np.hanning(len(x))
-    x_fenetre = x * fenetre
-    dt = np.mean(np.diff(t))
+    de l'axe temporel (ex: horloge/colonne 'ms' qui boucle).
+
+    Parameters:
+    -----------
+    df : pandas.DataFrame
+        DataFrame contenant les données du signal.
+    col_temps : str
+        Nom de la colonne du temps (ex: "ms").
+    col_signal : str
+        Nom de la colonne du signal/tension (ex: "V").
+    dt_force : float, optional
+        Pas de temps en secondes si connu à l'avance (ex: 0.020 pour 20 ms).
+        Si None, il est calculé automatiquement sur la médiane des deltas positifs.
+
+    Returns:
+    --------
+    freq : numpy.ndarray
+        Vecteur des fréquences en Hz.
+    fft_amp : numpy.ndarray
+        Amplitudes FFT associées (en V).
+    dt : float
+        Pas d'échantillonnage réel retenu (en secondes).
+    """
+    # 1. Extraction et nettoyage des données du signal
+    x = df[col_signal].values.astype(float)
     N = len(x)
-    fft_amp = np.abs(rfft(x_fenetre)) * (2.0 / np.sum(fenetre))
-    freq = rfftfreq(N, d=dt)
-    return freq, fft_amp
 
-def extract_amp(freq, amp, target_hz, tol_pct=0.05):
-    """Extrait l'amplitude maximale dans une bande de tolérance en % autour de la cible."""
-    # Calcul de la fenêtre de tolérance dynamique
+    if N == 0:
+        raise ValueError("Le tableau de données est vide.")
+
+    # 2. Détermination du pas d'échantillonnage dt (en secondes)
+    if dt_force is not None:
+        dt = float(dt_force)
+    else:
+        # Calcul des deltas entre lignes consécutives
+        diffs = np.diff(df[col_temps].values.astype(float))
+
+        # Filtrage : on ne garde que les deltas strictement positifs
+        # pour éliminer les sauts arrières lors des réinitialisations de l'horloge
+        diffs_positives = diffs[diffs > 0]
+
+        if len(diffs_positives) == 0:
+            raise ValueError(
+                "Impossible de déterminer le pas de temps depuis la colonne temporel."
+            )
+
+        dt_ms = np.median(diffs_positives)  # Pas de temps médian (ex: 20 ms)
+        dt = dt_ms / 1000.0  # Conversion ms -> secondes
+
+    # 3. Traitement du signal : suppression de la composante continue (offset DC)
+    x_centered = x - np.mean(x)
+
+    # 4. Fenêtrage Hanning d'apodisation pour éviter le fuite spectrale
+    fenetre = np.hanning(N)
+    x_fen = x_centered * fenetre
+
+    # 5. Calcul de la FFT réelle
+    # Correction de l'amplitude tenant compte de la puissance de la fenêtre
+    somme_fenetre = np.sum(fenetre)
+    fft_amp = np.abs(rfft(x_fen)) * (2.0 / somme_fenetre)
+
+    # 6. Vecteur des fréquences réelles
+    freq = rfftfreq(N, d=dt)
+
+    return freq, fft_amp, dt
+
+
+def obtenir_amplitude_a_frequence(freq, amp, target_hz, tol_pct=0.03):
+    """Recherche la valeur d'amplitude maximale d'un pic autour d'une fréquence cible.
+
+    Parameters:
+    -----------
+    freq : numpy.ndarray
+        Vecteur des fréquences en Hz.
+    amp : numpy.ndarray
+        Vecteur des amplitudes.
+    target_hz : float
+        Fréquence cible recherchée (ex: 0.016759 Hz).
+    tol_pct : float
+        Plage de tolérance relative (ex: 0.03 = ±3%).
+
+    Returns:
+    --------
+    dict: Dictionnaire contenant la fréquence cible, la fréquence réelle la plus proche
+          et l'amplitude mesurée.
+    """
     tol_hz = target_hz * tol_pct
-    fmin, fmax = target_hz - tol_hz, target_hz + tol_hz
-    
-    # Sécurité absolue : on empêche de descendre à 0 Hz (composante continue)
-    fmin = max(0.005, fmin) 
+    fmin, fmax = max(0.0, target_hz - tol_hz), target_hz + tol_hz
 
     mask = (freq >= fmin) & (freq <= fmax)
-    
+
     if np.any(mask):
-        # On renvoie le pic maximum trouvé DANS la fenêtre
-        return float(np.max(amp[mask]))
-    
-    # Sécurité si aucun point ne tombe dans la fenêtre (cas de très basse résolution)
-    idx = np.argmin(np.abs(freq - target_hz))
-    return float(amp[idx])
+        sub_indices = np.where(mask)[0]
+        max_sub_idx = sub_indices[np.argmax(amp[mask])]
+        f_trouvee = freq[max_sub_idx]
+        amp_trouvee = amp[max_sub_idx]
+    else:
+        idx = np.argmin(np.abs(freq - target_hz))
+        f_trouvee = freq[idx]
+        amp_trouvee = amp[idx]
 
-# --------------------------------------------------
-# INTERFACE BARRE LATÉRALE (SIDEBAR)
-# --------------------------------------------------
-st.sidebar.header("🛠️ Configuration")
-uploaded_file = st.sidebar.file_uploader("1. Importer le fichier Excel (.xlsx)", type=["xlsx"])
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("🎯 Recherche Intelligente des Pics")
-# On utilise maintenant un pourcentage (ex: 2% = 0.02)
-tol_recherche_pct = st.sidebar.slider(
-    "Tolérance de recherche autour de la cible (%) :", 
-    min_value=0.5, max_value=10.0, value=3.0, step=0.5,
-    help="Le script cherchera le pic d'amplitude maximum dans cette plage. Ex: Pour 13.67 Hz à 3%, il cherche entre 13.26 Hz et 14.08 Hz."
-) / 100.0
-
-st.sidebar.markdown("---")
-notes_text = st.sidebar.text_area(
-    "📝 Mean SUMOFDEF (1 year) :", 
-    value="A21A=1.3295615\nA21B=1.3798294\nA22A=1.1538701\nA22B=1.1731472\nA32A=1.2950152\nA42A=1.3890785\nA71A=1.7692308\nA71B=1.9425951", 
-    height=200,
-    help="Renseignez ici vos valeurs de défaut au format NomMachine=Valeur"
-)
-
-# --------------------------------------------------
-# LOGIQUE PRINCIPALE DE CALCUL
-# --------------------------------------------------
-if uploaded_file:
-    xls = pd.ExcelFile(uploaded_file)
-    resultats = []
-    
-    notes = {line.split("=")[0].strip(): float(line.split("=")[1].strip()) for line in notes_text.splitlines() if "=" in line}
-
-    FREQS_CIBLES = {
-        "Amplitude à 0,0167 Hz": 0.0167,
-        "Amplitude à 3,68 Hz (V)": 3.68,
-        "Amplitude à 12,33 Hz": 12.33,
-        "Amplitude à 13,67 Hz": 13.67
+    return {
+        "target_hz": target_hz,
+        "freq_reelle_hz": f_trouvee,
+        "amplitude_V": amp_trouvee,
     }
 
-    for feuille in xls.sheet_names:
-        try:
-            df = pd.read_excel(uploaded_file, sheet_name=feuille)
-            if not {"ms", "V"}.issubset(df.columns): 
+
+# ==============================================================================
+# EXECUTION DU SCRIPT SUR LE FICHIER EXCEL
+# ==============================================================================
+if __name__ == "__main__":
+    nom_fichier = "FFT_Décalage plaque_nettoyé.xlsx"
+
+    # Liste des fréquences cibles à rechercher dans chaque onglet
+    freqs_cibles = {
+        "Amplitude 0,016759 Hz": 0.016759,
+        "Amplitude 3,68 Hz": 3.68,
+        "Amplitude 12,33 Hz": 12.33,
+        "Amplitude 13,67 Hz": 13.67,
+    }
+
+    try:
+        xls = pd.ExcelFile(nom_fichier)
+        resultats = []
+
+        for nom_onglet in xls.sheet_names:
+            df = pd.read_excel(nom_fichier, sheet_name=nom_onglet)
+
+            # Nettoyage des espaces éventuels dans le nom des colonnes
+            df.columns = [str(c).strip() for c in df.columns]
+
+            if len(df.columns) < 2:
                 continue
 
-            freq, amp = calcul_fft(df)
+            col_temps = df.columns[0]  # Première colonne (ex: 'ms')
+            col_signal = df.columns[1]  # Deuxième colonne (ex: 'V')
 
-            res_row = {
-                "Système": feuille,
-                "Mean SUMOFDEF (1 year)": notes.get(feuille, np.nan)
+            # Calcul de la FFT avec correction automatique du temps
+            freq, amp, dt = calculer_fft_signal(
+                df, col_temps=col_temps, col_signal=col_signal
+            )
+
+            ligne_res = {
+                "Système / Onglet": nom_onglet,
+                "Nb Points": len(df),
+                "dt (s)": dt,
+                "Durée Totale (s)": round(len(df) * dt, 2),
             }
 
-            somme_freqs = 0.0
-            produit_freqs = 1.0
-            
-            for col_name, f_cible in FREQS_CIBLES.items():
-                # Appel de la fonction avec la tolérance en pourcentage
-                amp_val = extract_amp(freq, amp, f_cible, tol_pct=tol_recherche_pct)
-                res_row[col_name] = amp_val
-                somme_freqs += amp_val
-                produit_freqs *= amp_val
+            # Extrait l'amplitude pour chaque fréquence souhaitée
+            for label, f_cible in freqs_cibles.items():
+                info = obtenir_amplitude_a_frequence(freq, amp, f_cible)
+                ligne_res[label] = round(info["amplitude_V"], 6)
 
-            res_row["Produit des Fréquences"] = produit_freqs
-            res_row["Somme des Fréquences"] = somme_freqs
-            
-            resultats.append(res_row)
+            resultats.append(ligne_res)
 
-        except Exception as e:
-            st.sidebar.error(f"Erreur d'analyse sur l'onglet {feuille} : {e}")
+        # Affichage synthétique des résultats sous forme de DataFrame
+        df_resultats = pd.DataFrame(resultats)
+        print("\n--- RÉSULTATS DE L'ANALYSE FFT CORRIGÉE ---")
+        print(df_resultats.to_string(index=False))
 
-    if resultats:
-        df_res = pd.DataFrame(resultats)
-        df_valid = df_res.dropna(subset=["Mean SUMOFDEF (1 year)"])
-        
-        corr_row = {
-            "Système": "Coef. de corrélation DEF vs..",
-            "Mean SUMOFDEF (1 year)": "" 
-        }
-        
-        colonnes_a_correler = list(FREQS_CIBLES.keys()) + ["Produit des Fréquences", "Somme des Fréquences"]
-        
-        if len(df_valid) >= 2:
-            for col in colonnes_a_correler:
-                corr = df_valid["Mean SUMOFDEF (1 year)"].corr(df_valid[col])
-                if pd.notna(corr):
-                    corr_row[col] = f"{corr * 100:.2f}%"
-                else:
-                    corr_row[col] = "N/A"
-        else:
-            for col in colonnes_a_correler:
-                corr_row[col] = "N/A"
+        # Optionnel : Exporter le tableau propre vers un fichier Excel
+        # df_resultats.to_excel("Resultats_FFT_Corriges.xlsx", index=False)
 
-        df_display = df_res.copy()
-        
-        df_display["Produit des Fréquences"] = df_display["Produit des Fréquences"].apply(lambda x: f"{x:.2E}")
-        for col in FREQS_CIBLES.keys():
-            df_display[col] = df_display[col].apply(lambda x: f"{x:.5f}")
-        df_display["Somme des Fréquences"] = df_display["Somme des Fréquences"].apply(lambda x: f"{x:.5f}")
-
-        df_display = pd.concat([df_display, pd.DataFrame([corr_row])], ignore_index=True)
-
-        st.subheader("📊 Tableau de Synthèse et Corrélations (Recherche sur Plages Flexibles)")
-        st.dataframe(df_display, use_container_width=True, hide_index=True)
-        
-        csv = df_display.to_csv(index=False, sep=";").encode('utf-8')
-        st.download_button(
-            label="📥 Télécharger le tableau en CSV",
-            data=csv,
-            file_name='resultats_fft_amplitudes.csv',
-            mime='text/csv',
+    except FileNotFoundError:
+        print(
+            f"Erreur : Le fichier '{nom_fichier}' n'a pas été trouvé dans le dossier."
         )
-else:
-    st.info("Veuillez importer un fichier Excel depuis la barre latérale pour lancer l'analyse.")
