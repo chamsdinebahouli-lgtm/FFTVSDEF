@@ -1,8 +1,8 @@
 """
 app.py
 ------
-Analyseur Électrique DC & FFT - Application Streamlit (fichier unique).
-Intégration d'indicateurs professionnels (DC, RMS, Taux d'ondulation, Facteur de crête).
+Analyseur Électrique DC & Diagnostique Vibratoire - Application Streamlit (fichier unique).
+Intégration d'indicateurs avancés : RMS, Peak, Peak-to-Peak, Crest Factor, Kurtosis, Skewness, THD, SNR, Énergie, Offset DC.
 """
 
 from __future__ import annotations
@@ -17,13 +17,14 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 from scipy.fft import rfft, rfftfreq
+from scipy.stats import kurtosis, skew
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# LOGIQUE MÉTIER : calculs électriques DC, FFT et métriques d'ondulation
+# LOGIQUE MÉTIER : calculs électriques DC, statistiques avancées et FFT
 # =============================================================================
 
 
@@ -77,44 +78,68 @@ def detecter_dt(temps: np.ndarray, unite: UniteTemps = UniteTemps.MILLISECONDES)
     return float(np.median(diffs_pos) / facteur)
 
 
-def calculer_metriques_dc(signal: np.ndarray) -> dict[str, float]:
-    """Calcule les indicateurs électriques professionnels pour un signal DC."""
+def calculer_metriques_avancees(signal: np.ndarray, resultat_fft: ResultatFFT) -> dict[str, float]:
+    """Calcule l'ensemble des indicateurs statistiques et électriques avancés."""
     x = np.asarray(signal, dtype=float)
     x = x[~np.isnan(x)]
     n = len(x)
 
     if n == 0:
-        return {"DC (V)": 0.0, "RMS Total (V)": 0.0, "RMS AC (V)": 0.0, "Taux d'ondulation (%)": 0.0, "Facteur de Crête": 1.0}
+        return {}
 
-    # 1. Composante DC (Moyenne arithmétique)
+    # 1. Offset DC & Énergies
     dc_val = float(np.mean(x))
-
-    # 2. Valeur RMS Totale (Efficace globale)
     rms_total = float(np.sqrt(np.mean(x**2)))
-
-    # 3. Composante alternative (AC / Ondulations)
+    
     x_ac = x - dc_val
     rms_ac = float(np.sqrt(np.mean(x_ac**2)))
+    energie_ac = float(np.sum(x_ac**2))
 
-    # 4. Taux d'ondulation (Ripple Factor en %) : (RMS_ac / |DC|) * 100
-    if abs(dc_val) > 1e-9:
-        taux_ondulation = float((rms_ac / abs(dc_val)) * 100.0)
-    else:
-        taux_ondulation = 0.0
+    # 2. Amplitudes Extrêmes
+    peak_val = float(np.max(np.abs(x_ac)))
+    min_val, max_val = float(np.min(x)), float(np.max(x))
+    peak_to_peak = max_val - min_val
 
-    # 5. Facteur de Crête (Crest Factor) : Pic AC / RMS AC
-    peak_ac = float(np.max(np.abs(x_ac)))
+    # 3. Facteur de Crête (Crest Factor)
     if rms_ac > 1e-9:
-        facteur_crete = float(peak_ac / rms_ac)
+        crest_factor = float(peak_val / rms_ac)
     else:
-        facteur_crete = 1.0
+        crest_factor = 1.0
+
+    # 4. Indicateurs statistiques de forme (Kurtosis & Skewness)
+    # Fisher=True par défaut dans scipy (kurtosis d'une loi normale = 0, on ajoute 3 pour la convention mécanique où Normal = 3)
+    kurt = float(kurtosis(x, fisher=False, bias=False)) if n > 3 else 3.0
+    skw = float(skew(x, bias=False)) if n > 2 else 0.0
+
+    # 5. THD & SNR spectraux
+    freq, amp = resultat_fft.freq, resultat_fft.amplitude
+    energie_totale_spec = float(np.sum(amp**2))
+    
+    # Estimation du bruit vs signal utile via la variance spectrale
+    if energie_totale_spec > 1e-9:
+        # On approxime le bruit par la médiane ou la partie non-fondamentale
+        bruit_estime = float(np.median(amp)) if len(amp) > 0 else 0.0
+        signal_utile_estime = float(np.max(amp))
+        snr = float(20 * np.log10(signal_utile_estime / bruit_estime)) if bruit_estime > 1e-9 else 0.0
+        
+        # THD simplifié : rapport de l'énergie hors pic principal sur l'énergie totale spectrale
+        thd = float((np.sqrt(max(0, energie_totale_spec - signal_utile_estime**2)) / (signal_utile_estime + 1e-9)) * 100.0)
+    else:
+        snr = 0.0
+        thd = 0.0
 
     return {
-        "DC (V)": dc_val,
+        "Offset DC (V)": dc_val,
         "RMS Total (V)": rms_total,
         "RMS AC (V)": rms_ac,
-        "Taux d'ondulation (%)": taux_ondulation,
-        "Facteur de Crête": facteur_crete,
+        "Peak (V)": peak_val,
+        "Peak-to-Peak (V)": peak_to_peak,
+        "Crest Factor": crest_factor,
+        "Kurtosis": kurt,
+        "Skewness": skw,
+        "THD (%)": thd,
+        "SNR (dB)": snr,
+        "Énergie AC": energie_ac,
     }
 
 
@@ -183,31 +208,32 @@ def analyser_systeme(
     freqs_cibles: dict[str, float],
     unite_temps: UniteTemps = UniteTemps.MILLISECONDES,
 ) -> dict:
-    """Pipeline complet pour un système (un onglet Excel) incluant DC et FFT."""
+    """Pipeline complet pour un système (un onglet Excel)."""
     dt = detecter_dt(df[col_temps].values, unite=unite_temps)
     signal_brut = df[col_signal].values
 
-    # 1. Calcul des indicateurs globaux DC & Qualité d'onde
-    metriques_dc = calculer_metriques_dc(signal_brut)
+    # 1. Calcul de la FFT
+    resultat_fft = calculer_fft(signal_brut, dt=dt, mode=mode)
 
-    # 2. Calcul FFT pour le suivi des harmoniques/ondulations ciblées
-    resultat = calculer_fft(signal_brut, dt=dt, mode=mode)
+    # 2. Calcul des indicateurs avancés (Statistiques, Énergie, Forme, THD, SNR...)
+    metriques = calculer_metriques_avancees(signal_brut, resultat_fft)
 
-    amplitudes_ondulations: dict[str, float] = {}
+    # 3. Extraction des amplitudes sur les fréquences cinématiques cibles (ex: 1 tr/min à 0.0167 Hz)
+    amplitudes_cibles: dict[str, float] = {}
     alertes_resolution: list[str] = []
     tolerance_relative = 0.03
 
     for nom_composant, f_cible in freqs_cibles.items():
-        amplitudes_ondulations[nom_composant] = extraire_amplitude(resultat, f_cible, mode, tolerance_relative)
-        if mode == ModeFFT.NOUVEAU and not resolution_suffisante(resultat, f_cible, tolerance_relative):
+        amplitudes_cibles[nom_composant] = extraire_amplitude(resultat_fft, f_cible, mode, tolerance_relative)
+        if mode == ModeFFT.NOUVEAU and not resolution_suffisante(resultat_fft, f_cible, tolerance_relative):
             alertes_resolution.append(nom_composant)
 
     return {
-        **metriques_dc,
-        "ondulations": amplitudes_ondulations,
-        "dt": resultat.dt,
-        "resolution_hz": resultat.resolution_hz,
-        "n_points": resultat.n_points,
+        **metriques,
+        "cibles": amplitudes_cibles,
+        "dt": resultat_fft.dt,
+        "resolution_hz": resultat_fft.resolution_hz,
+        "n_points": resultat_fft.n_points,
         "alertes_resolution": alertes_resolution,
     }
 
@@ -234,20 +260,20 @@ def lire_onglet(xls: pd.ExcelFile, nom_onglet: str) -> pd.DataFrame:
 # =============================================================================
 
 FREQS_CIBLES = {
-    "Ondulation 1 (0.0167 Hz)": 0.016759,
-    "Ondulation 2 (3.68 Hz)": 3.68,
-    "Ondulation 3 (12.33 Hz)": 12.33,
-    "Commutation (13.67 Hz)": 13.67,
+    "Rotation 1 tr/min (0.0167 Hz)": 0.016759,
+    "1er étage réducteur (3.68 Hz)": 3.68,
+    "Dernier étage réducteur (12.33 Hz)": 12.33,
+    "Moteur / Commutation (13.67 Hz)": 13.67,
 }
 
-st.set_page_config(page_title="Analyseur Électrique DC & Ondulations", layout="wide")
-st.title("⚡ Analyseur Électrique DC & Qualité du Signal")
-st.write("Suivi professionnel : Composante DC, Taux d'ondulation (Ripple), RMS et Analyse Spectrale.")
+st.set_page_config(page_title="Diagnostic Électromécanique DC & FFT", layout="wide")
+st.title("⚡ Analyseur Avancé : Couplage Électrique & Vibratoire (1 tr/min)")
+st.write("Suivi multi-indicateurs professionnels : Kurtosis, Facteur de Crête, THD, RMS et Analyse Spectrale.")
 
 st.sidebar.header("⚙️ Paramètres")
 
 mode_label = st.sidebar.radio(
-    "Méthode FFT (Ondulations) :",
+    "Méthode FFT :",
     ["Ancien Mode (Sans fenêtre, point fixe)", "Nouveau Mode (Hanning, pic local ±3%)"],
 )
 mode_calcul = ModeFFT.from_label_ui(mode_label)
@@ -262,11 +288,11 @@ unite_temps = (
 
 st.sidebar.markdown("---")
 st.sidebar.header("📊 Indicateurs Statistiques & Seuils")
-afficher_moyenne = st.sidebar.checkbox("Afficher la Ligne de Moyenne", value=True)
+afficher_moyenne = st.sidebar.checkbox("Afficher la Ligne de Moyenne du lot", value=True)
 afficher_seuil = st.sidebar.checkbox(
-    "Afficher le Seuil d'Alerte Lot (Moyenne + 1σ)",
+    "Afficher le Seuil d'Alerte (Moyenne + 1σ)",
     value=True,
-    help="Repère les machines présentant un taux d'ondulation ou un RMS anormalement élevé par rapport au lot.",
+    help="Repère les machines présentant des déviations statistiques anormales par rapport au parc.",
 )
 
 uploaded_file = st.sidebar.file_uploader("Importer le fichier Excel (.xlsx)", type=["xlsx", "xls"])
@@ -313,62 +339,85 @@ if uploaded_file is not None:
         st.error("Aucun onglet exploitable trouvé.")
         st.stop()
 
+    # Construction du tableau synthétique complet
     lignes = []
     for r in resultats:
         ligne = {
-            "Système / Ligne DC": r["nom"],
-            "DC (V)": round(r["DC (V)"], 4),
+            "Système / Machine": r["nom"],
+            "Offset DC (V)": round(r["Offset DC (V)"], 4),
             "RMS Total (V)": round(r["RMS Total (V)"], 4),
             "RMS AC (V)": round(r["RMS AC (V)"], 4),
-            "Taux d'ondulation (%)": round(r["Taux d'ondulation (%)"], 3),
-            "Facteur de Crête": round(r["Facteur de Crête"], 3),
+            "Peak (V)": round(r["Peak (V)"], 4),
+            "Peak-to-Peak (V)": round(r["Peak-to-Peak (V)"], 4),
+            "Crest Factor": round(r["Crest Factor"], 3),
+            "Kurtosis": round(r["Kurtosis"], 3),
+            "Skewness": round(r["Skewness"], 3),
+            "THD (%)": round(r["THD (%)"], 2),
+            "SNR (dB)": round(r["SNR (dB)"], 2),
         }
-        for comp, val in r["ondulations"].items():
+        for comp, val in r["cibles"].items():
             ligne[comp] = round(val, 5)
         lignes.append(ligne)
 
     df_res = pd.DataFrame(lignes)
 
-    st.subheader("📋 Tableau Synthétique - Indicateurs Électriques DC")
+    st.subheader("📋 Tableau Synthétique - Indicateurs Électromécaniques Avancés")
     st.dataframe(df_res, use_container_width=True)
 
-    cols_ondulations = list(FREQS_CIBLES.keys())
+    # Listes des colonnes métriques disponibles pour les graphiques
+    metriques_disponibles = [
+        "Kurtosis",
+        "Crest Factor",
+        "RMS AC (V)",
+        "Peak-to-Peak (V)",
+        "THD (%)",
+        "SNR (dB)",
+        "RMS Total (V)",
+        "Offset DC (V)",
+    ]
+
+    cols_cibles = list(FREQS_CIBLES.keys())
     df_melted = df_res.melt(
-        id_vars=["Système / Ligne DC", "DC (V)", "RMS Total (V)", "Taux d'ondulation (%)", "Facteur de Crête"],
-        value_vars=cols_ondulations,
-        var_name="Fréquence / Ondulation",
-        value_name="Amplitude AC (V)",
+        id_vars=["Système / Machine"] + metriques_disponibles,
+        value_vars=cols_cibles,
+        var_name="Composante / Fréquence Cible",
+        value_name="Amplitude Spectrale (V)",
     )
 
     st.markdown("---")
-    st.subheader("📈 Visualisation Dynamique & Qualité Électrique")
+    st.subheader("📈 Visualisation & Diagnostic Dynamique")
 
-    metrique_maitresse = st.selectbox(
-        "Métrique principale pour le classement dynamique du parc :",
-        ["Taux d'ondulation (%)", "RMS Total (V)", "DC (V)", "Facteur de Crête"],
-        index=0,
-        help="Permet de trier automatiquement les machines de la plus saine à la plus perturbée.",
-    )
+    col_gauche, col_droite = st.columns(2)
+    with col_gauche:
+        metrique_maitresse = st.selectbox(
+            "Indicateur principal à analyser / classer :",
+            options=metriques_disponibles,
+            index=0,
+            help="Sélectionnez un indicateur sensible aux chocs ou aux ondulations pour identifier les machines atypiques.",
+        )
+    with col_droite:
+        sens_tri = st.radio("Ordre de classement :", ["Du plus faible au plus fort", "Du plus fort au plus faible"], horizontal=True)
 
-    ordre_systemes = df_res.sort_values(by=metrique_maitresse, ascending=True)["Système / Ligne DC"].tolist()
+    ascending_flag = True if sens_tri.startswith("Du plus faible") else False
+    ordre_systemes = df_res.sort_values(by=metrique_maitresse, ascending=ascending_flag)["Système / Machine"].tolist()
 
     tab1, tab2, tab3 = st.tabs(
         [
-            "📊 Vue Globale (Métrique Principale)",
-            "📶 Spectre des Ondulations",
-            "🔍 Focus Composante / Fréquence",
+            f"📊 Classement Global ({metrique_maitresse})",
+            "📶 Spectre des Fréquences Cibles (1 tr/min, etc.)",
+            "🔍 Focus par Composant Mécanique",
         ]
     )
 
     with tab1:
-        st.markdown(f"#### Classement du parc selon : {metrique_maitresse} (Du plus faible au plus fort)")
+        st.markdown(f"#### Classement du parc selon l'indicateur : **{metrique_maitresse}**")
         fig_global = px.bar(
             df_res,
-            x="Système / Ligne DC",
+            x="Système / Machine",
             y=metrique_maitresse,
-            title=f"Classement par {metrique_maitresse}",
+            title=f"Classement des machines par {metrique_maitresse}",
             text_auto=".2f",
-            category_orders={"Système / Ligne DC": ordre_systemes},
+            category_orders={"Système / Machine": ordre_systemes},
             color=metrique_maitresse,
             color_continuous_scale="Viridis",
         )
@@ -385,54 +434,55 @@ if uploaded_file is not None:
                 annotation_position="bottom right",
             )
         if afficher_seuil and not pd.isna(val_std):
+            seuil_alerte = val_moy + val_std
             fig_global.add_hline(
-                y=val_moy + val_std,
+                y=seuil_alerte,
                 line_dash="dot",
                 line_color="red",
-                annotation_text=f"Alerte (Moy+σ): {val_moy + val_std:.2f}",
+                annotation_text=f"Alerte (Moy+σ): {seuil_alerte:.2f}",
                 annotation_position="top right",
             )
 
         st.plotly_chart(fig_global, use_container_width=True)
 
     with tab2:
-        st.markdown("#### Contribution des harmoniques / ondulations par ligne")
+        st.markdown("#### Amplitudes spectrales par machine (Empilées)")
         fig_stacked = px.bar(
             df_melted,
-            x="Système / Ligne DC",
-            y="Amplitude AC (V)",
-            color="Fréquence / Ondulation",
-            title="Amplitudes des Ondulations AC par Ligne",
+            x="Système / Machine",
+            y="Amplitude Spectrale (V)",
+            color="Composante / Fréquence Cible",
+            title="Contribution des Fréquences Cibles (dont 1 tr/min)",
             barmode="stack",
-            category_orders={"Système / Ligne DC": ordre_systemes},
+            category_orders={"Système / Machine": ordre_systemes},
         )
         st.plotly_chart(fig_stacked, use_container_width=True)
 
     with tab3:
-        st.markdown("#### Analyse Ciblée par Fréquence d'Ondulation")
+        st.markdown("#### Analyse Ciblée par Composante Fréquentielle")
         composant_selectionne = st.selectbox(
-            "Sélectionner l'ondulation ou la fréquence à inspecter :",
-            options=["Tous les composants"] + cols_ondulations,
+            "Sélectionner la fréquence/composante à inspecter :",
+            options=["Toutes les composantes"] + cols_cibles,
         )
 
-        if composant_selectionne == "Tous les composants":
+        if composant_selectionne == "Toutes les composantes":
             df_filtre = df_melted
-            titre_f = "Toutes les ondulations confondues"
+            titre_f = "Toutes les fréquences cibles"
         else:
-            df_filtre = df_melted[df_melted["Fréquence / Ondulation"] == composant_selectionne]
-            df_filtre = df_filtre.sort_values(by="Amplitude AC (V)", ascending=True)
+            df_filtre = df_melted[df_melted["Composante / Fréquence Cible"] == composant_selectionne]
+            df_filtre = df_filtre.sort_values(by="Amplitude Spectrale (V)", ascending=ascending_flag)
             titre_f = f"Zoom sur : {composant_selectionne}"
 
         fig_single = px.bar(
             df_filtre,
-            x="Système / Ligne DC",
-            y="Amplitude AC (V)",
-            color="Fréquence / Ondulation" if composant_selectionne == "Tous les composants" else None,
+            x="Système / Machine",
+            y="Amplitude Spectrale (V)",
+            color="Composante / Fréquence Cible" if composant_selectionne == "Toutes les composantes" else None,
             title=titre_f,
-            text_auto=".4f" if composant_selectionne != "Tous les composants" else False,
+            text_auto=".4f" if composant_selectionne != "Toutes les composantes" else False,
             barmode="group",
         )
         st.plotly_chart(fig_single, use_container_width=True)
 
 else:
-    st.info("👈 Veuillez importer votre fichier Excel dans la barre latérale pour lancer l'analyse DC.")
+    st.info("👈 Veuillez importer votre fichier Excel dans la barre latérale pour lancer l'analyse avancée.")
