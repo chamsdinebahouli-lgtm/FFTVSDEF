@@ -376,16 +376,19 @@ if uploaded_file is not None:
         "Offset DC (V)",
     ]
 
-    # Filtrage dynamique pour ne garder que les métriques réellement présentes dans df_res
     metriques_existantes = [m for m in metriques_disponibles if m in df_res.columns]
     cols_cibles = list(FREQS_CIBLES.keys())
 
-    df_melted = df_res.melt(
-        id_vars=["Système / Machine"] + metriques_existantes,
+    # Fusion propre en n'utilisant que le nom de la machine comme identifiant
+    df_melted = pd.melt(
+        df_res,
+        id_vars=["Système / Machine"],
         value_vars=cols_cibles,
         var_name="Composante / Fréquence Cible",
         value_name="Amplitude Spectrale (V)",
     )
+    # Ré-associe proprement les métriques de base pour chaque machine
+    df_melted = df_melted.merge(df_res[["Système / Machine"] + metriques_existantes], on="Système / Machine", how="left")
 
     st.markdown("---")
     st.subheader("📈 Visualisation & Diagnostic Dynamique")
