@@ -290,13 +290,6 @@ def analyser_systeme(
         **metriques,
         "cibles_v": amplitudes_v,
         "cibles_pct_dc": amplitudes_pct_dc,
-        # Somme des amplitudes des composantes cibles. Additionne des
-        # fréquences correspondant à des mécanismes de défaut différents,
-        # donc pas un indicateur de santé mécanique validé scientifiquement.
-        # Conservée à la demande explicite de l'utilisateur pour son suivi
-        # personnel (tendance globale au fil des imports) : NE PAS
-        # interpréter comme un diagnostic, chaque composant individuel reste
-        # la référence pour un diagnostic mécanique.
         "Somme des amplitudes (indicatif)": float(sum(amplitudes_pct_dc.values())),
         "dc": resultat_fft.dc,
         "dt": resultat_fft.dt,
@@ -394,7 +387,14 @@ def generer_pdf_rapport_complet(
 
     data_table = [cols_pdf]
     for _, row in df_res.iterrows():
-        data_table.append([str(row[c]) for c in cols_pdf])
+        ligne_formatee = []
+        for c in cols_pdf:
+            val = row[c]
+            if isinstance(val, (int, float)):
+                ligne_formatee.append(f"{val:.4f}")
+            else:
+                ligne_formatee.append(str(val))
+        data_table.append(ligne_formatee)
 
     t = Table(data_table, repeatRows=1)
     t.setStyle(TableStyle([
@@ -697,8 +697,6 @@ if uploaded_file is not None:
     if fichier_defectivite is not None:
         df_defect_importe = None
         derniere_erreur = None
-        # Essai 1 : format standard (séparateur virgule, décimale point)
-        # Essai 2 : format Excel français (séparateur point-virgule, décimale virgule)
         for kwargs_lecture in (
             {"sep": ",", "decimal": "."},
             {"sep": ";", "decimal": ","},
@@ -727,9 +725,7 @@ if uploaded_file is not None:
     )
     if "Niveau de défectivité" not in df_defect_base.columns:
         df_defect_base["Niveau de défectivité"] = 0.0
-    # Cast explicite en float : un merge avec un DataFrame vide (avant tout
-    # import) peut laisser la colonne en dtype "object", ce qui la fait
-    # silencieusement disparaître de df.corr(numeric_only=True) plus loin.
+    
     df_defect_base["Niveau de défectivité"] = pd.to_numeric(
         df_defect_base["Niveau de défectivité"], errors="coerce"
     ).fillna(0.0)
@@ -740,10 +736,9 @@ if uploaded_file is not None:
         "Renseigne un niveau de défaut mesuré par système. Privilégie une "
         "valeur continue précise (ex: 1,3295615) plutôt qu'une échelle "
         "grossière (0/1/2/3) si tu en disposes : ça évite d'écraser de "
-        "l'information et donne une corrélation plus fiable. Ces valeurs ne "
-        "sont pas calculées par l'application — ce sont tes constats terrain, "
-        "utilisés uniquement pour l'onglet Corrélation ci-dessous."
+        "l'information et donne une corrélation plus fiable."
     )
+    
     df_defect_edite = st.data_editor(
         df_defect_base,
         column_config={
@@ -754,10 +749,19 @@ if uploaded_file is not None:
         hide_index=True,
         key="editeur_defectivite",
     )
-    # Re-cast après l'édition : st.data_editor peut renvoyer un dtype object
-    # selon les versions de Streamlit/pandas, même avec une NumberColumn.
+    
+    # RE-CAST APRÈS ÉDITION & FUSION DANS LE DATAFRAME GLOBAL
     df_defect_edite["Niveau de défectivité"] = pd.to_numeric(
         df_defect_edite["Niveau de défectivité"], errors="coerce"
+    ).fillna(0.0)
+
+    # Suppression de l'ancienne colonne si elle existait déjà avant merge pour éviter les doublons _x/_y
+    if "Niveau de défectivité" in df_res.columns:
+        df_res = df_res.drop(columns=["Niveau de défectivité"])
+
+    df_res = df_res.merge(df_defect_edite, on="Système / Machine", how="left")
+    df_res["Niveau de défectivité"] = pd.to_numeric(
+        df_res["Niveau de défectivité"], errors="coerce"
     ).fillna(0.0)
 
     csv_defect_bytes = df_defect_edite.to_csv(index=False).encode("utf-8")
@@ -767,11 +771,6 @@ if uploaded_file is not None:
         file_name="journal_defectivite.csv",
         mime="text/csv",
     )
-
-    df_res = df_res.merge(df_defect_edite, on="Système / Machine", how="left")
-    df_res["Niveau de défectivité"] = pd.to_numeric(
-        df_res["Niveau de défectivité"], errors="coerce"
-    ).fillna(0.0)
 
     st.subheader("📋 Tableau Synthétique - Indicateurs Électromécaniques")
     if normaliser_dc:
@@ -783,8 +782,7 @@ if uploaded_file is not None:
     else:
         st.caption(
             "⚠️ Amplitudes par composante en Volts bruts : dépendent du gain de "
-            "la chaîne d'acquisition, à ne comparer qu'entre mesures faites avec "
-            "exactement le même matériel."
+            "la chaîne d'acquisition."
         )
     st.dataframe(
         df_res,
@@ -792,13 +790,6 @@ if uploaded_file is not None:
         column_config={
             "Niveau de défectivité": st.column_config.NumberColumn(format="%.7f"),
         },
-    )
-    st.caption(
-        "'Distorsion Spectrale' et 'Ratio Pic/Bruit' sont des indicateurs "
-        "indicatifs maison (voir info-bulle du code), pas les définitions "
-        "normées THD/SNR. La somme des amplitudes sert uniquement à ordonner "
-        "visuellement les machines, ce n'est pas un indicateur de santé "
-        "mécanique global — chaque composant doit être évalué individuellement."
     )
 
     metriques_disponibles = [
@@ -928,13 +919,8 @@ if uploaded_file is not None:
         st.caption(
             "Objectif : repérer quel(s) indicateur(s) varient le plus avec le "
             "niveau de défaut que tu mesures sur le terrain. Deux coefficients "
-            "affichés (-1 à +1, proche de 0 = pas de lien) : **Pearson** suppose "
-            "une relation linéaire et est sensible à l'échelle exacte des "
-            "valeurs ; **Spearman** ne regarde que l'ordre des valeurs (relation "
-            "monotone, pas forcément linéaire) et est plus robuste si tu n'es "
-            "pas sûr de la forme de la relation. À interpréter avec prudence "
-            "avec peu de machines (les deux deviennent instables en dessous "
-            "d'une dizaine de points)."
+            "affichés (-1 à +1, proche de 0 = pas de lien) : **Pearson** (linéaire) "
+            "et **Spearman** (monotone)."
         )
 
         if df_res["Niveau de défectivité"].nunique() <= 1:
@@ -958,22 +944,14 @@ if uploaded_file is not None:
             )
 
             if "Niveau de défectivité" not in matrice_pearson.columns:
-                st.warning(
-                    "Impossible de calculer la corrélation : la colonne 'Niveau de "
-                    "défectivité' n'a pas pu être traitée comme numérique. "
-                    "Réessaie après avoir vérifié les valeurs saisies dans le "
-                    "journal ci-dessus (uniquement des nombres)."
-                )
+                st.warning("Impossible de calculer la corrélation : la colonne 'Niveau de défectivité' n'est pas numérique.")
                 correlations = pd.Series(dtype=float)
             else:
                 pearson_s = matrice_pearson["Niveau de défectivité"].drop("Niveau de défectivité")
                 spearman_s = matrice_spearman["Niveau de défectivité"].drop("Niveau de défectivité")
                 correlations = pearson_s.dropna().sort_values(key=lambda s: s.abs(), ascending=False)
 
-            if correlations.empty:
-                if "Niveau de défectivité" in matrice_pearson.columns:
-                    st.info("Pas assez de variation dans les données pour calculer une corrélation exploitable.")
-            else:
+            if not correlations.empty:
                 df_corr = pd.DataFrame({
                     "Indicateur": correlations.index,
                     "Pearson (linéaire)": correlations.values,
@@ -1004,18 +982,12 @@ if uploaded_file is not None:
                         trendline="ols",
                     )
                 except Exception:
-                    # Repli si statsmodels n'est pas installé (trendline indisponible)
                     fig_scatter = px.scatter(
                         df_res, x="Niveau de défectivité", y=indicateur_focus,
                         text="Système / Machine", title=f"{indicateur_focus} vs Niveau de défectivité",
                     )
                 fig_scatter.update_traces(textposition="top center")
                 st.plotly_chart(fig_scatter, use_container_width=True)
-
-                st.caption(
-                    "La droite de tendance (régression linéaire) est indicative : "
-                    "avec peu de machines, ne pas sur-interpréter sa pente."
-                )
 
     st.markdown("---")
     st.subheader("📥 Exportation des Résultats & Rapports Complets")
