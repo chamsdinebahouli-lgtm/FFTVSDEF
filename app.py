@@ -2,7 +2,7 @@
 app.py
 ------
 Analyseur Électrique DC & Diagnostique Vibratoire - Application Streamlit (fichier unique).
-Intégration d'indicateurs avancés, de la Somme des amplitudes, Export CSV et Rapport Global complet.
+Intégration d'indicateurs avancés, de la Somme des amplitudes corrigée, Export CSV et Rapport Global complet.
 """
 
 from __future__ import annotations
@@ -130,7 +130,7 @@ def calculer_metriques_avancees(signal: np.ndarray, resultat_fft: ResultatFFT) -
         skw = float(skew(x, bias=False)) if n > 2 else 0.0
 
         freq, amp = resultat_fft.freq, resultat_fft.amplitude
-        somme_amp = float(np.sum(amp))
+        somme_amp = float(np.sum(np.abs(amp)))
         energie_totale_spec = float(np.sum(amp**2))
         
         if energie_totale_spec > 1e-9:
