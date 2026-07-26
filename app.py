@@ -239,8 +239,8 @@ def calculer_metriques_avancees(signal: np.ndarray, resultat_fft: ResultatFFT) -
             "Distorsion Spectrale (%) - indicatif": thd,
             "Ratio Pic/Bruit (dB) - indicatif": snr,
         }
-    except Exception as e:
-        logger.error(f"Erreur lors du calcul des métriques avancées : {e}")
+ except Exception as e:
+            st.sidebar.warning(f"Impossible de lancer la détection auto des pics : {e}")
         return metriques_par_defaut
 
 
