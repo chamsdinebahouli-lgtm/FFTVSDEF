@@ -84,7 +84,7 @@ def calculer_metriques_dc(signal: np.ndarray) -> dict[str, float]:
     n = len(x)
 
     if n == 0:
-        return {"DC": 0.0, "RMS Total": 0.0, "RMS AC": 0.0, "Taux d'ondulation (%)": 0.0, "Facteur de Crête": 0.0}
+        return {"DC (V)": 0.0, "RMS Total (V)": 0.0, "RMS AC (V)": 0.0, "Taux d'ondulation (%)": 0.0, "Facteur de Crête": 1.0}
 
     # 1. Composante DC (Moyenne arithmétique)
     dc_val = float(np.mean(x))
@@ -167,6 +167,14 @@ def extraire_amplitude(
     return float(amp[idx])
 
 
+def resolution_suffisante(
+    resultat: ResultatFFT, freq_cible: float, tolerance_relative: float = 0.03
+) -> bool:
+    """Vérifie que la résolution fréquentielle permet de distinguer une fréquence cible."""
+    largeur_fenetre = 2 * freq_cible * tolerance_relative
+    return largeur_fenetre >= 2 * resultat.resolution_hz
+
+
 def analyser_systeme(
     df: pd.DataFrame,
     col_temps: str,
@@ -187,11 +195,11 @@ def analyser_systeme(
 
     amplitudes_ondulations: dict[str, float] = {}
     alertes_resolution: list[str] = []
+    tolerance_relative = 0.03
 
     for nom_composant, f_cible in freqs_cibles.items():
-        amplitudes_ondulations[nom_composant] = extraire_amplitude(resultat, f_cible, mode)
-         largeur_fenetre = 2 * f_cible * tolerance_relative = 2 * f_cible * 0.03
-        if mode == ModeFFT.NOUVEAU and (2 * f_cible * 0.03) < (2 * resultat.resolution_hz):
+        amplitudes_ondulations[nom_composant] = extraire_amplitude(resultat, f_cible, mode, tolerance_relative)
+        if mode == ModeFFT.NOUVEAU and not resolution_suffisante(resultat, f_cible, tolerance_relative):
             alertes_resolution.append(nom_composant)
 
     return {
@@ -305,7 +313,6 @@ if uploaded_file is not None:
         st.error("Aucun onglet exploitable trouvé.")
         st.stop()
 
-    # Construction du tableau de synthèse professionnel DC
     lignes = []
     for r in resultats:
         ligne = {
@@ -316,7 +323,6 @@ if uploaded_file is not None:
             "Taux d'ondulation (%)": round(r["Taux d'ondulation (%)"], 3),
             "Facteur de Crête": round(r["Facteur de Crête"], 3),
         }
-        # Ajout des amplitudes spectrales d'ondulation
         for comp, val in r["ondulations"].items():
             ligne[comp] = round(val, 5)
         lignes.append(ligne)
@@ -326,7 +332,6 @@ if uploaded_file is not None:
     st.subheader("📋 Tableau Synthétique - Indicateurs Électriques DC")
     st.dataframe(df_res, use_container_width=True)
 
-    # Préparation pour les graphiques dynamiques
     cols_ondulations = list(FREQS_CIBLES.keys())
     df_melted = df_res.melt(
         id_vars=["Système / Ligne DC", "DC (V)", "RMS Total (V)", "Taux d'ondulation (%)", "Facteur de Crête"],
@@ -338,7 +343,6 @@ if uploaded_file is not None:
     st.markdown("---")
     st.subheader("📈 Visualisation Dynamique & Qualité Électrique")
 
-    # Choix de la métrique principale à classer et afficher dynamiquement
     metrique_maitresse = st.selectbox(
         "Métrique principale pour le classement dynamique du parc :",
         ["Taux d'ondulation (%)", "RMS Total (V)", "DC (V)", "Facteur de Crête"],
@@ -346,7 +350,6 @@ if uploaded_file is not None:
         help="Permet de trier automatiquement les machines de la plus saine à la plus perturbée.",
     )
 
-    # Rangement dynamique croissant (du plus petit au plus grand)
     ordre_systemes = df_res.sort_values(by=metrique_maitresse, ascending=True)["Système / Ligne DC"].tolist()
 
     tab1, tab2, tab3 = st.tabs(
@@ -415,13 +418,10 @@ if uploaded_file is not None:
         if composant_selectionne == "Tous les composants":
             df_filtre = df_melted
             titre_f = "Toutes les ondulations confondues"
-            vals_stat = df_melted["Amplitude AC (V)"]
         else:
             df_filtre = df_melted[df_melted["Fréquence / Ondulation"] == composant_selectionne]
-            # Tri dynamique spécifique à l'ondulation choisie
             df_filtre = df_filtre.sort_values(by="Amplitude AC (V)", ascending=True)
             titre_f = f"Zoom sur : {composant_selectionne}"
-            vals_stat = df_filtre["Amplitude AC (V)"]
 
         fig_single = px.bar(
             df_filtre,
