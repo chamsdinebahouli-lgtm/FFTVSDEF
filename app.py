@@ -2,7 +2,7 @@
 app.py
 ------
 Analyseur Électrique DC & Diagnostique Vibratoire - Application Streamlit (fichier unique).
-Intégration d'indicateurs avancés, de la Somme des amplitudes corrigée, Export CSV et Rapport Global complet.
+Somme des amplitudes restreinte aux 4 fréquences ciblées, Export CSV et Rapport Global complet.
 """
 
 from __future__ import annotations
@@ -89,7 +89,7 @@ def detecter_dt(temps: np.ndarray, unite: UniteTemps = UniteTemps.MILLISECONDES)
 
 
 def calculer_metriques_avancees(signal: np.ndarray, resultat_fft: ResultatFFT) -> dict[str, float]:
-    """Calcule l'ensemble des indicateurs statistiques, électriques et la somme des amplitudes."""
+    """Calcule l'ensemble des indicateurs statistiques et électriques."""
     x = np.asarray(signal, dtype=float)
     x = x[~np.isnan(x)]
     n = len(x)
@@ -105,7 +105,6 @@ def calculer_metriques_avancees(signal: np.ndarray, resultat_fft: ResultatFFT) -
         "Skewness": 0.0,
         "THD (%)": 0.0,
         "SNR (dB)": 0.0,
-        "Somme des amplitudes": 0.0,
         "Énergie AC": 0.0,
     }
 
@@ -130,7 +129,6 @@ def calculer_metriques_avancees(signal: np.ndarray, resultat_fft: ResultatFFT) -
         skw = float(skew(x, bias=False)) if n > 2 else 0.0
 
         freq, amp = resultat_fft.freq, resultat_fft.amplitude
-        somme_amp = float(np.sum(np.abs(amp)))
         energie_totale_spec = float(np.sum(amp**2))
         
         if energie_totale_spec > 1e-9:
@@ -153,7 +151,6 @@ def calculer_metriques_avancees(signal: np.ndarray, resultat_fft: ResultatFFT) -
             "Skewness": skw,
             "THD (%)": thd,
             "SNR (dB)": snr,
-            "Somme des amplitudes": somme_amp,
             "Énergie AC": energie_ac,
         }
     except Exception as e:
@@ -242,9 +239,13 @@ def analyser_systeme(
         if mode == ModeFFT.NOUVEAU and not resolution_suffisante(resultat_fft, f_cible, tolerance_relative):
             alertes_resolution.append(nom_composant)
 
+    # Calcul de la somme des 4 amplitudes ciblées uniquement
+    somme_amp_cibles = float(sum(amplitudes_cibles.values()))
+
     return {
         **metriques,
         "cibles": amplitudes_cibles,
+        "Somme des amplitudes": somme_amp_cibles,
         "dt": resultat_fft.dt,
         "resolution_hz": resultat_fft.resolution_hz,
         "n_points": resultat_fft.n_points,
@@ -253,7 +254,7 @@ def analyser_systeme(
 
 
 def lire_onglet(xls: pd.ExcelFile, nom_onglet: str) -> pd.DataFrame:
-    """Lit un onglet et vérifie qu'il contient au minimum deux colonnes exploitables."""
+    """Lit un onglet et vérifie qu'il contient au moins deux colonnes exploitables."""
     df = pd.read_excel(xls, sheet_name=nom_onglet)
     df.columns = [str(c).strip() for c in df.columns]
 
@@ -373,7 +374,7 @@ def generer_pdf_rapport_complet(df_res: pd.DataFrame, resultats_bruts: list[dict
             ["Skewness", f"{r.get('Skewness', 0):.3f}"],
             ["THD (%)", f"{r.get('THD (%)', 0):.2f}%"],
             ["SNR (dB)", f"{r.get('SNR (dB)', 0):.2f} dB"],
-            ["Somme des amplitudes", f"{r.get('Somme des amplitudes', 0):.4f}"],
+            ["Somme des amplitudes (4 cibles)", f"{r.get('Somme des amplitudes', 0):.4f}"],
         ]
         t_met = Table(fiche_metriques, repeatRows=1)
         t_met.setStyle(TableStyle([
@@ -465,7 +466,7 @@ def generer_html_rapport_complet(df_res: pd.DataFrame, resultats_bruts: list[dic
             <tr><td>Skewness</td><td>{r.get('Skewness', 0):.3f}</td></tr>
             <tr><td>THD (%)</td><td>{r.get('THD (%)', 0):.2f}%</td></tr>
             <tr><td>SNR (dB)</td><td>{r.get('SNR (dB)', 0):.2f} dB</td></tr>
-            <tr><td>Somme des amplitudes</td><td>{r.get('Somme des amplitudes', 0):.4f}</td></tr>
+            <tr><td>Somme des amplitudes (4 cibles)</td><td>{r.get('Somme des amplitudes', 0):.4f}</td></tr>
         </table>
         <h2>Amplitudes Spectrales par Composante</h2>
         <table>
