@@ -15,6 +15,7 @@ docstrings de `calculer_metriques_avancees` pour le détail.
 from __future__ import annotations
 
 import io
+import json
 import logging
 from dataclasses import dataclass
 from enum import Enum
@@ -596,6 +597,12 @@ FREQS_CIBLES = {
     "Moteur / Commutation (13.67 Hz)": 13.67,
 }
 
+# Fréquences ajoutées manuellement par l'utilisateur (ex: depuis un pic
+# détecté automatiquement) : persistées le temps de la session Streamlit
+# (perdues si l'onglet du navigateur est fermé — pas de sauvegarde disque).
+if "freqs_perso" not in st.session_state:
+    st.session_state["freqs_perso"] = {}
+
 st.set_page_config(page_title="Diagnostic Électromécanique DC & FFT", layout="wide")
 st.title("⚡ Analyseur Avancé : Signal Électrique DC & Diagnostic Spectral")
 st.write(
@@ -632,15 +639,48 @@ normaliser_dc = st.sidebar.checkbox("Normaliser par la composante DC (% de modul
 unite_amplitude = "% DC" if normaliser_dc else "V"
 
 st.sidebar.markdown("---")
+st.sidebar.header("🧩 Fréquences Personnalisées")
+st.sidebar.caption(
+    "Ajoute d'autres fréquences que les 4 de base (ex: un pic repéré dans "
+    "l'onglet 'Détection Auto de Pics'). Une fois ajoutées, elles sont "
+    "suivies pour TOUTES les machines, comme les 4 fréquences d'origine."
+)
+with st.sidebar.form("form_ajout_freq_perso", clear_on_submit=True):
+    nom_freq_perso = st.text_input("Nom du composant")
+    valeur_freq_perso = st.number_input("Fréquence (Hz)", min_value=0.0, value=0.0, step=0.01, format="%.5f")
+    ajout_valide = st.form_submit_button("➕ Ajouter")
+    if ajout_valide:
+        if not nom_freq_perso.strip():
+            st.sidebar.warning("Renseigne un nom pour ce composant.")
+        elif valeur_freq_perso <= 0:
+            st.sidebar.warning("La fréquence doit être supérieure à 0 Hz.")
+        elif nom_freq_perso in FREQS_CIBLES or nom_freq_perso in st.session_state["freqs_perso"]:
+            st.sidebar.warning("Ce nom existe déjà, choisis-en un autre.")
+        else:
+            st.session_state["freqs_perso"][nom_freq_perso] = valeur_freq_perso
+            st.rerun()
+
+if st.session_state["freqs_perso"]:
+    st.sidebar.caption("Fréquences personnalisées actives :")
+    for nom_perso, f_perso in list(st.session_state["freqs_perso"].items()):
+        col_nom, col_suppr = st.sidebar.columns([4, 1])
+        col_nom.write(f"• {nom_perso} ({f_perso:.5f} Hz)")
+        if col_suppr.button("🗑️", key=f"suppr_{nom_perso}"):
+            del st.session_state["freqs_perso"][nom_perso]
+            st.rerun()
+
+FREQS_TOUTES = {**FREQS_CIBLES, **st.session_state["freqs_perso"]}
+
+st.sidebar.markdown("---")
 st.sidebar.header("➕ Composants de la Somme")
 st.sidebar.caption(
-    "Choisis quelles fréquences cibles entrent dans la 'Somme des amplitudes "
-    "(indicatif)'. Les 4 ci-dessous restent suivies individuellement dans le "
-    "tableau et les graphiques quoi qu'il arrive — ceci ne change que le "
-    "calcul de la somme."
+    "Choisis quelles fréquences entrent dans la 'Somme des amplitudes "
+    "(indicatif)'. Toutes restent suivies individuellement dans le tableau "
+    "et les graphiques quoi qu'il arrive — ceci ne change que le calcul de "
+    "la somme."
 )
 composants_inclus_somme = [
-    nom_composant for nom_composant in FREQS_CIBLES
+    nom_composant for nom_composant in FREQS_TOUTES
     if st.sidebar.checkbox(nom_composant, value=True, key=f"inclure_{nom_composant}")
 ]
 
@@ -671,9 +711,10 @@ fichier_defectivite = st.sidebar.file_uploader(
 
 
 @st.cache_data(show_spinner=False)
-def _analyser_fichier(file_bytes: bytes, mode_value: str, unite_value: str):
+def _analyser_fichier(file_bytes: bytes, mode_value: str, unite_value: str, freqs_json: str):
     mode = ModeFFT(mode_value)
     unite = UniteTemps(unite_value)
+    freqs_cibles = json.loads(freqs_json)
 
     xls = pd.ExcelFile(io.BytesIO(file_bytes))
     resultats = []
@@ -684,7 +725,7 @@ def _analyser_fichier(file_bytes: bytes, mode_value: str, unite_value: str):
             df = lire_onglet(xls, nom_onglet)
             res = analyser_systeme(
                 df=df, col_temps=df.columns[0], col_signal=df.columns[1],
-                mode=mode, freqs_cibles=FREQS_CIBLES, unite_temps=unite,
+                mode=mode, freqs_cibles=freqs_cibles, unite_temps=unite,
             )
             resultats.append({"nom": nom_onglet, **res})
         except Exception as exc:
@@ -695,7 +736,8 @@ def _analyser_fichier(file_bytes: bytes, mode_value: str, unite_value: str):
 
 if uploaded_file is not None:
     resultats, erreurs = _analyser_fichier(
-        uploaded_file.getvalue(), mode_calcul.value, unite_temps.value
+        uploaded_file.getvalue(), mode_calcul.value, unite_temps.value,
+        json.dumps(FREQS_TOUTES, sort_keys=True),
     )
 
     if erreurs:
@@ -847,7 +889,7 @@ if uploaded_file is not None:
         "Somme des amplitudes (indicatif)", "RMS Total (V)", "Offset DC (V)",
     ]
     metriques_existantes = [m for m in metriques_disponibles if m in df_res.columns]
-    cols_cibles = [col for col in FREQS_CIBLES.keys() if col in df_res.columns]
+    cols_cibles = [col for col in FREQS_TOUTES.keys() if col in df_res.columns]
 
     if cols_cibles:
         df_melted = pd.melt(
@@ -1115,7 +1157,7 @@ if uploaded_file is not None:
                 for idx in indices_pics:
                     f_val = float(freq_spectre[idx])
                     a_val = float(amp_spectre[idx])
-                    nom_proche, ecart = identifier_frequence_cible_proche(f_val, FREQS_CIBLES)
+                    nom_proche, ecart = identifier_frequence_cible_proche(f_val, FREQS_TOUTES)
                     correspondance = (
                         f"≈ {nom_proche} (écart {ecart * 100:.1f}%)" if nom_proche else "Aucune fréquence cible connue proche"
                     )
@@ -1132,9 +1174,38 @@ if uploaded_file is not None:
                 st.dataframe(df_pics, use_container_width=True, hide_index=True)
                 st.caption(
                     f"Somme des pics détectés et affichés ci-dessus (indicatif, "
-                    f"distinct de la 'Somme des amplitudes' des 4 fréquences "
-                    f"cibles) : **{df_pics[f'Amplitude ({unite_amplitude})'].sum():.4f} {unite_amplitude}**"
+                    f"distinct de la 'Somme des amplitudes' des fréquences "
+                    f"suivies) : **{df_pics[f'Amplitude ({unite_amplitude})'].sum():.4f} {unite_amplitude}**"
                 )
+
+                st.markdown("##### Ajouter un pic détecté au suivi permanent")
+                st.caption(
+                    "Le fait de l'ajouter ici le fera suivre pour TOUTES les "
+                    "machines (pas seulement celle-ci), et il apparaîtra dans "
+                    "la barre latérale sous 'Fréquences Personnalisées'."
+                )
+                col_choix, col_nom, col_bouton = st.columns([2, 2, 1])
+                with col_choix:
+                    freq_a_ajouter = st.selectbox(
+                        "Pic à ajouter :",
+                        options=df_pics["Fréquence (Hz)"].tolist(),
+                        key="select_pic_a_ajouter",
+                    )
+                with col_nom:
+                    nom_pic_a_ajouter = st.text_input(
+                        "Nom à lui donner :",
+                        value=f"Perso {freq_a_ajouter:.3f} Hz",
+                        key="nom_pic_a_ajouter",
+                    )
+                with col_bouton:
+                    st.write("")
+                    st.write("")
+                    if st.button("➕ Ajouter", key="bouton_ajout_pic_detecte"):
+                        if nom_pic_a_ajouter in FREQS_TOUTES:
+                            st.warning("Ce nom existe déjà, choisis-en un autre.")
+                        else:
+                            st.session_state["freqs_perso"][nom_pic_a_ajouter] = float(freq_a_ajouter)
+                            st.rerun()
 
                 fig_spectre = px.line(
                     x=freq_spectre, y=amp_spectre,
@@ -1147,7 +1218,7 @@ if uploaded_file is not None:
                     name="Pics détectés",
                 )
                 for _, ligne_cible in pd.DataFrame(
-                    {"nom": list(FREQS_CIBLES.keys()), "freq": list(FREQS_CIBLES.values())}
+                    {"nom": list(FREQS_TOUTES.keys()), "freq": list(FREQS_TOUTES.values())}
                 ).iterrows():
                     fig_spectre.add_vline(
                         x=ligne_cible["freq"], line_dash="dot", line_color="gray", opacity=0.5,
