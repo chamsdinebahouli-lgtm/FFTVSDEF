@@ -2,7 +2,7 @@
 app.py
 ------
 Analyseur Électrique DC & Diagnostique Vibratoire - Application Streamlit (fichier unique).
-Intégration d'indicateurs avancés : RMS, Peak, Peak-to-Peak, Crest Factor, Kurtosis, Skewness, THD, SNR, Énergie, Offset DC.
+Intégration d'indicateurs avancés, Export CSV et Rapport PDF.
 """
 
 from __future__ import annotations
@@ -18,6 +18,12 @@ import plotly.express as px
 import streamlit as st
 from scipy.fft import rfft, rfftfreq
 from scipy.stats import kurtosis, skew
+
+# Importation pour la génération du PDF avec ReportLab
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -256,6 +262,92 @@ def lire_onglet(xls: pd.ExcelFile, nom_onglet: str) -> pd.DataFrame:
     return df
 
 
+def generer_pdf_rapport(df_res: pd.DataFrame, metrique_maitresse: str) -> bytes:
+    """Génère un rapport PDF synthétique du parc machine."""
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
+    elements = []
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        'TitleStyle',
+        parent=styles['Heading1'],
+        fontSize=18,
+        textColor=colors.HexColor("#1E3A8A"),
+        spaceAfter=12,
+        alignment=1
+    )
+    subtitle_style = ParagraphStyle(
+        'SubtitleStyle',
+        parent=styles['Normal'],
+        fontSize=10,
+        textColor=colors.HexColor("#4B5563"),
+        spaceAfter=20,
+        alignment=1
+    )
+    heading_style = ParagraphStyle(
+        'HeadingStyle',
+        parent=styles['Heading2'],
+        fontSize=14,
+        textColor=colors.HexColor("#1E3A8A"),
+        spaceBefore=12,
+        spaceAfter=8
+    )
+    body_style = ParagraphStyle(
+        'BodyStyle',
+        parent=styles['Normal'],
+        fontSize=10,
+        textColor=colors.HexColor("#1F2937"),
+        spaceAfter=6
+    )
+
+    elements.append(Paragraph("Rapport de Diagnostic Électromécanique & Vibratoire", title_style))
+    elements.append(Paragraph("Analyse automatisée du parc - Indicateurs Avancés & Spectres FFT", subtitle_style))
+
+    elements.append(Paragraph("Synthèse Globale", heading_style))
+    n_machines = len(df_res)
+    elements.append(Paragraph(f"Nombre total de systèmes / machines analysés : <b>{n_machines}</b>", body_style))
+    elements.append(Paragraph(f"Indicateur maître de classement : <b>{metrique_maitresse}</b>", body_style))
+
+    if metrique_maitresse in df_res.columns:
+        val_moy = df_res[metrique_maitresse].mean()
+        val_max = df_res[metrique_maitresse].max()
+        machine_max = df_res.loc[df_res[metrique_maitresse].idxmax(), "Système / Machine"] if n_machines > 0 else "N/A"
+        elements.append(Paragraph(f"• Moyenne du parc pour {metrique_maitresse} : <b>{val_moy:.4f}</b>", body_style))
+        elements.append(Paragraph(f"• Valeur maximale : <b>{val_max:.4f}</b> (Machine : <b>{machine_max}</b>)", body_style))
+
+    elements.append(Spacer(1, 15))
+    elements.append(Paragraph("Tableau Récapitulatif des Indicateurs Clés", heading_style))
+
+    # Sélectionner un sous-ensemble de colonnes pour le tableau PDF
+    cols_a_afficher = ["Système / Machine", "Offset DC (V)", "RMS Total (V)", "Crest Factor", "Kurtosis", "THD (%)"]
+    cols_pdf = [c for c in cols_a_afficher if c in df_res.columns]
+
+    data_table = [cols_pdf]
+    for _, row in df_res.iterrows():
+        data_table.append([str(row[c]) for c in cols_pdf])
+
+    t = Table(data_table, repeatRows=1)
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, 0), 9),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 6),
+        ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor("#F3F4F6")),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#D1D5DB")),
+        ('FONTSIZE', (0, 1), (-1, -1), 8),
+        ('TOPPADDING', (0, 1), (-1, -1), 4),
+        ('BOTTOMPADDING', (0, 1), (-1, -1), 4),
+    ]))
+
+    elements.append(t)
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
 # =============================================================================
 # INTERFACE STREAMLIT
 # =============================================================================
@@ -340,7 +432,7 @@ if uploaded_file is not None:
         st.error("Aucun onglet exploitable trouvé.")
         st.stop()
 
-    # Construction du tableau synthétique complet sécurisée avec .get()
+    # Construction du tableau synthétique complet sécurisée
     lignes = []
     for r in resultats:
         ligne = {
@@ -376,13 +468,20 @@ if uploaded_file is not None:
         "Offset DC (V)",
     ]
 
-    cols_cibles = list(FREQS_CIBLES.keys())
-    df_melted = df_res.melt(
-        id_vars=["Système / Machine"] + metriques_disponibles,
-        value_vars=cols_cibles,
-        var_name="Composante / Fréquence Cible",
-        value_name="Amplitude Spectrale (V)",
-    )
+    metriques_existantes = [m for m in metriques_disponibles if m in df_res.columns]
+    cols_cibles = [col for col in FREQS_CIBLES.keys() if col in df_res.columns]
+
+    if cols_cibles:
+        df_melted = pd.melt(
+            df_res,
+            id_vars=["Système / Machine"],
+            value_vars=cols_cibles,
+            var_name="Composante / Fréquence Cible",
+            value_name="Amplitude Spectrale (V)",
+        )
+        df_melted = df_melted.merge(df_res[["Système / Machine"] + metriques_existantes], on="Système / Machine", how="left")
+    else:
+        df_melted = pd.DataFrame(columns=["Système / Machine", "Composante / Fréquence Cible", "Amplitude Spectrale (V)"] + metriques_existantes)
 
     st.markdown("---")
     st.subheader("📈 Visualisation & Diagnostic Dynamique")
@@ -391,7 +490,7 @@ if uploaded_file is not None:
     with col_gauche:
         metrique_maitresse = st.selectbox(
             "Indicateur principal à analyser / classer :",
-            options=metriques_disponibles,
+            options=metriques_existantes if metriques_existantes else ["Système / Machine"],
             index=0,
             help="Sélectionnez un indicateur sensible aux chocs ou aux ondulations pour identifier les machines atypiques.",
         )
@@ -399,7 +498,7 @@ if uploaded_file is not None:
         sens_tri = st.radio("Ordre de classement :", ["Du plus faible au plus fort", "Du plus fort au plus faible"], horizontal=True)
 
     ascending_flag = True if sens_tri.startswith("Du plus faible") else False
-    ordre_systemes = df_res.sort_values(by=metrique_maitresse, ascending=ascending_flag)["Système / Machine"].tolist()
+    ordre_systemes = df_res.sort_values(by=metrique_maitresse, ascending=ascending_flag)["Système / Machine"].tolist() if metrique_maitresse in df_res.columns else []
 
     tab1, tab2, tab3 = st.tabs(
         [
@@ -447,16 +546,19 @@ if uploaded_file is not None:
 
     with tab2:
         st.markdown("#### Amplitudes spectrales par machine (Empilées)")
-        fig_stacked = px.bar(
-            df_melted,
-            x="Système / Machine",
-            y="Amplitude Spectrale (V)",
-            color="Composante / Fréquence Cible",
-            title="Contribution des Fréquences Cibles (dont 1 tr/min)",
-            barmode="stack",
-            category_orders={"Système / Machine": ordre_systemes},
-        )
-        st.plotly_chart(fig_stacked, use_container_width=True)
+        if not df_melted.empty:
+            fig_stacked = px.bar(
+                df_melted,
+                x="Système / Machine",
+                y="Amplitude Spectrale (V)",
+                color="Composante / Fréquence Cible",
+                title="Contribution des Fréquences Cibles (dont 1 tr/min)",
+                barmode="stack",
+                category_orders={"Système / Machine": ordre_systemes},
+            )
+            st.plotly_chart(fig_stacked, use_container_width=True)
+        else:
+            st.info("Aucune donnée spectrale disponible pour le graphique empilé.")
 
     with tab3:
         st.markdown("#### Analyse Ciblée par Composante Fréquentielle")
@@ -465,25 +567,58 @@ if uploaded_file is not None:
             options=["Toutes les composantes"] + cols_cibles,
         )
 
-        if composant_selectionne == "Toutes les composantes":
-            df_filtre = df_melted
-            titre_f = "Toutes les fréquences cibles"
-        else:
-            df_filtre = df_melted[df_melted["Composante / Fréquence Cible"] == composant_selectionne]
-            df_filtre = df_filtre.sort_values(by="Amplitude Spectrale (V)", ascending=ascending_flag)
-            titre_f = f"Zoom sur : {composant_selectionne}"
+        if not df_melted.empty:
+            if composant_selectionne == "Toutes les composantes":
+                df_filtre = df_melted
+                titre_f = "Toutes les fréquences cibles"
+            else:
+                df_filtre = df_melted[df_melted["Composante / Fréquence Cible"] == composant_selectionne]
+                df_filtre = df_filtre.sort_values(by="Amplitude Spectrale (V)", ascending=ascending_flag)
+                titre_f = f"Zoom sur : {composant_selectionne}"
 
-        fig_single = px.bar(
-            df_filtre,
-            x="Système / Machine",
-            y="Amplitude Spectrale (V)",
-            color="Composante / Fréquence Cible" if composant_selectionne == "Toutes les composantes" else None,
-            title=titre_f,
-            text_auto=".4f" if composant_selectionne != "Toutes les composantes" else False,
-            barmode="group",
+            fig_single = px.bar(
+                df_filtre,
+                x="Système / Machine",
+                y="Amplitude Spectrale (V)",
+                color="Composante / Fréquence Cible" if composant_selectionne == "Toutes les composantes" else None,
+                title=titre_f,
+                text_auto=".4f" if composant_selectionne != "Toutes les composantes" else False,
+                barmode="group",
+            )
+            st.plotly_chart(fig_single, use_container_width=True)
+        else:
+            st.info("Aucune donnée disponible pour l'analyse ciblée.")
+
+    # =========================================================================
+    # EXPORTS : CSV & RAPPORT PDF
+    # =========================================================================
+    st.markdown("---")
+    st.subheader("📥 Exportation des Résultats")
+
+    col_exp1, col_exp2 = st.columns(2)
+
+    with col_exp1:
+        csv_bytes = df_res.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="📥 Télécharger le tableau synthétique (CSV)",
+            data=csv_bytes,
+            file_name="synthese_indicateurs_electromecaniques.csv",
+            mime="text/csv",
+            use_container_width=True,
         )
-        st.plotly_chart(fig_single, use_container_width=True)
+
+    with col_exp2:
+        try:
+            pdf_bytes = generer_pdf_rapport(df_res, metrique_maitresse)
+            st.download_button(
+                label="📄 Télécharger le Rapport d'Analyse (PDF)",
+                data=pdf_bytes,
+                file_name="rapport_diagnostic_parc.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+        except Exception as e:
+            st.warning(f"La génération du PDF nécessite le paquet `reportlab` ({e}).")
 
 else:
     st.info("👈 Veuillez importer votre fichier Excel dans la barre latérale pour lancer l'analyse avancée.")
-    
