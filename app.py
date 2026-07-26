@@ -1044,78 +1044,89 @@ if uploaded_file is not None:
         systeme_focus = st.selectbox("Système à inspecter :", options=noms_systemes, key="select_pics_auto")
         r_focus = next(r for r in resultats if r["nom"] == systeme_focus)
 
-        freq_spectre = r_focus["spectre_freq"]
-        amp_spectre = r_focus["spectre_amplitude_pct_dc"] if normaliser_dc else r_focus["spectre_amplitude_v"]
-
-        col_seuil, col_dist = st.columns(2)
-        with col_seuil:
-            seuil_pic_abs = st.number_input(
-                f"Seuil minimal des pics ({unite_amplitude})",
-                min_value=0.0, value=0.0, step=0.01,
-                help="Amplitude absolue minimale pour qu'un pic soit retenu, dans "
-                "l'unité actuellement sélectionnée. Contrairement à un seuil en "
-                "% du maximum du spectre, une valeur absolue reste cohérente "
-                "d'une machine à l'autre.",
+        if "spectre_freq" not in r_focus:
+            st.warning(
+                "Les données de spectre ne sont pas disponibles pour ce système "
+                "(résultat probablement mis en cache avant une mise à jour de "
+                "l'application). Clique sur le bouton ci-dessous puis "
+                "réimporte ton fichier Excel."
             )
-        with col_dist:
-            separation_min_hz = st.number_input(
-                "Séparation minimale entre deux pics (Hz)",
-                min_value=0.0, value=max(r_focus["resolution_hz"] * 3, 0.01), step=0.01,
-                help="Exprimée en Hz (pas en nombre d'échantillons), pour rester "
-                "cohérente même si les machines ont des durées d'enregistrement "
-                "différentes.",
-            )
-
-        distance_echantillons = max(1, int(round(separation_min_hz / r_focus["resolution_hz"])))
-        hauteur_min = seuil_pic_abs if seuil_pic_abs > 0 else None
-        indices_pics, _ = find_peaks(amp_spectre, height=hauteur_min, distance=distance_echantillons)
-
-        if len(indices_pics) == 0:
-            st.info("Aucun pic détecté avec ces réglages. Baisse le seuil minimal si besoin.")
+            if st.button("🔄 Vider le cache et recalculer"):
+                st.cache_data.clear()
+                st.rerun()
         else:
-            lignes_pics = []
-            for idx in indices_pics:
-                f_val = float(freq_spectre[idx])
-                a_val = float(amp_spectre[idx])
-                nom_proche, ecart = identifier_frequence_cible_proche(f_val, FREQS_CIBLES)
-                correspondance = (
-                    f"≈ {nom_proche} (écart {ecart * 100:.1f}%)" if nom_proche else "Aucune fréquence cible connue proche"
+            freq_spectre = r_focus["spectre_freq"]
+            amp_spectre = r_focus["spectre_amplitude_pct_dc"] if normaliser_dc else r_focus["spectre_amplitude_v"]
+
+            col_seuil, col_dist = st.columns(2)
+            with col_seuil:
+                seuil_pic_abs = st.number_input(
+                    f"Seuil minimal des pics ({unite_amplitude})",
+                    min_value=0.0, value=0.0, step=0.01,
+                    help="Amplitude absolue minimale pour qu'un pic soit retenu, dans "
+                    "l'unité actuellement sélectionnée. Contrairement à un seuil en "
+                    "% du maximum du spectre, une valeur absolue reste cohérente "
+                    "d'une machine à l'autre.",
                 )
-                lignes_pics.append({
-                    "Fréquence (Hz)": round(f_val, 5),
-                    f"Amplitude ({unite_amplitude})": round(a_val, 5),
-                    "Correspondance": correspondance,
-                })
-
-            df_pics = pd.DataFrame(lignes_pics).sort_values(
-                by=f"Amplitude ({unite_amplitude})", ascending=False
-            ).reset_index(drop=True)
-
-            st.dataframe(df_pics, use_container_width=True, hide_index=True)
-            st.caption(
-                f"Somme des pics détectés et affichés ci-dessus (indicatif, "
-                f"distinct de la 'Somme des amplitudes' des 4 fréquences "
-                f"cibles) : **{df_pics[f'Amplitude ({unite_amplitude})'].sum():.4f} {unite_amplitude}**"
-            )
-
-            fig_spectre = px.line(
-                x=freq_spectre, y=amp_spectre,
-                labels={"x": "Fréquence (Hz)", "y": f"Amplitude ({unite_amplitude})"},
-                title=f"Spectre complet — {systeme_focus}",
-            )
-            fig_spectre.add_scatter(
-                x=df_pics["Fréquence (Hz)"], y=df_pics[f"Amplitude ({unite_amplitude})"],
-                mode="markers", marker=dict(color="red", size=9, symbol="x"),
-                name="Pics détectés",
-            )
-            for _, ligne_cible in pd.DataFrame(
-                {"nom": list(FREQS_CIBLES.keys()), "freq": list(FREQS_CIBLES.values())}
-            ).iterrows():
-                fig_spectre.add_vline(
-                    x=ligne_cible["freq"], line_dash="dot", line_color="gray", opacity=0.5,
+            with col_dist:
+                separation_min_hz = st.number_input(
+                    "Séparation minimale entre deux pics (Hz)",
+                    min_value=0.0, value=max(r_focus["resolution_hz"] * 3, 0.01), step=0.01,
+                    help="Exprimée en Hz (pas en nombre d'échantillons), pour rester "
+                    "cohérente même si les machines ont des durées d'enregistrement "
+                    "différentes.",
                 )
-            st.plotly_chart(fig_spectre, use_container_width=True)
-            st.caption("Lignes verticales grises : les 4 fréquences cibles suivies par ailleurs, pour repère visuel.")
+
+            distance_echantillons = max(1, int(round(separation_min_hz / r_focus["resolution_hz"])))
+            hauteur_min = seuil_pic_abs if seuil_pic_abs > 0 else None
+            indices_pics, _ = find_peaks(amp_spectre, height=hauteur_min, distance=distance_echantillons)
+
+            if len(indices_pics) == 0:
+                st.info("Aucun pic détecté avec ces réglages. Baisse le seuil minimal si besoin.")
+            else:
+                lignes_pics = []
+                for idx in indices_pics:
+                    f_val = float(freq_spectre[idx])
+                    a_val = float(amp_spectre[idx])
+                    nom_proche, ecart = identifier_frequence_cible_proche(f_val, FREQS_CIBLES)
+                    correspondance = (
+                        f"≈ {nom_proche} (écart {ecart * 100:.1f}%)" if nom_proche else "Aucune fréquence cible connue proche"
+                    )
+                    lignes_pics.append({
+                        "Fréquence (Hz)": round(f_val, 5),
+                        f"Amplitude ({unite_amplitude})": round(a_val, 5),
+                        "Correspondance": correspondance,
+                    })
+
+                df_pics = pd.DataFrame(lignes_pics).sort_values(
+                    by=f"Amplitude ({unite_amplitude})", ascending=False
+                ).reset_index(drop=True)
+
+                st.dataframe(df_pics, use_container_width=True, hide_index=True)
+                st.caption(
+                    f"Somme des pics détectés et affichés ci-dessus (indicatif, "
+                    f"distinct de la 'Somme des amplitudes' des 4 fréquences "
+                    f"cibles) : **{df_pics[f'Amplitude ({unite_amplitude})'].sum():.4f} {unite_amplitude}**"
+                )
+
+                fig_spectre = px.line(
+                    x=freq_spectre, y=amp_spectre,
+                    labels={"x": "Fréquence (Hz)", "y": f"Amplitude ({unite_amplitude})"},
+                    title=f"Spectre complet — {systeme_focus}",
+                )
+                fig_spectre.add_scatter(
+                    x=df_pics["Fréquence (Hz)"], y=df_pics[f"Amplitude ({unite_amplitude})"],
+                    mode="markers", marker=dict(color="red", size=9, symbol="x"),
+                    name="Pics détectés",
+                )
+                for _, ligne_cible in pd.DataFrame(
+                    {"nom": list(FREQS_CIBLES.keys()), "freq": list(FREQS_CIBLES.values())}
+                ).iterrows():
+                    fig_spectre.add_vline(
+                        x=ligne_cible["freq"], line_dash="dot", line_color="gray", opacity=0.5,
+                    )
+                st.plotly_chart(fig_spectre, use_container_width=True)
+                st.caption("Lignes verticales grises : les 4 fréquences cibles suivies par ailleurs, pour repère visuel.")
 
     st.markdown("---")
     st.subheader("📥 Exportation des Résultats & Rapports Complets")
