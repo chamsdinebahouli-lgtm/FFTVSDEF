@@ -2,7 +2,7 @@
 app.py
 ------
 Analyseur Électrique DC & Diagnostique Vibratoire - Application Streamlit (fichier unique).
-Somme des amplitudes restreinte aux 4 fréquences ciblées, Export CSV et Rapport Global complet.
+Somme des amplitudes calculée strictement par la somme des 4 fréquences ciblées.
 """
 
 from __future__ import annotations
@@ -239,7 +239,7 @@ def analyser_systeme(
         if mode == ModeFFT.NOUVEAU and not resolution_suffisante(resultat_fft, f_cible, tolerance_relative):
             alertes_resolution.append(nom_composant)
 
-    # Calcul de la somme des 4 amplitudes ciblées uniquement
+    # Somme stricte des 4 amplitudes ciblées
     somme_amp_cibles = float(sum(amplitudes_cibles.values()))
 
     return {
@@ -493,7 +493,7 @@ FREQS_CIBLES = {
 
 st.set_page_config(page_title="Diagnostic Électromécanique DC & FFT", layout="wide")
 st.title("⚡ Analyseur Avancé : Couplage Électrique & Vibratoire (1 tr/min)")
-st.write("Suivi multi-indicateurs professionnels : Kurtosis, Facteur de Crête, THD, Somme des amplitudes et Analyse Spectrale.")
+st.write("Suivi multi-indicateurs professionnels : Kurtosis, Facteur de Crête, THD, Somme des amplitudes ciblées et Analyse Spectrale.")
 
 st.sidebar.header("⚙️ Paramètres")
 
