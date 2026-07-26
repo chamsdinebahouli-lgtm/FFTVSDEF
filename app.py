@@ -239,8 +239,8 @@ def calculer_metriques_avancees(signal: np.ndarray, resultat_fft: ResultatFFT) -
             "Distorsion Spectrale (%) - indicatif": thd,
             "Ratio Pic/Bruit (dB) - indicatif": snr,
         }
- except Exception as e:
-            st.sidebar.warning(f"Impossible de lancer la détection auto des pics : {e}")
+    except Exception as e:
+        logger.error(f"Erreur lors du calcul des métriques avancées : {e}")
         return metriques_par_defaut
 
 
@@ -683,7 +683,7 @@ if uploaded_file is not None:
                 if p["nom"] in pics_selectionnes:
                     freqs_cibles_dyn[p["nom"]] = p["frequence"]
         except Exception as e:
-            st.sidebar.warning(fImpossible de lancer la détection auto des pics : {e})
+            st.sidebar.warning(f"Impossible de lancer la détection auto des pics : {e}")
 
     # Lancement de l'analyse globale avec les fréquences cibles dynamiques (empiriques + auto sélectionnées)
     resultats, erreurs = _analyser_fichier(
