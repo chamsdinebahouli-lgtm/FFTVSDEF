@@ -718,8 +718,10 @@ if uploaded_file is not None:
     st.markdown("---")
     st.subheader("🔗 Journal de Défectivité")
     st.caption(
-        "Renseigne un niveau de défaut observé par système (échelle libre, "
-        "ex: 0 = sain, 1 = léger, 2 = modéré, 3 = sévère). Ces valeurs ne "
+        "Renseigne un niveau de défaut mesuré par système. Privilégie une "
+        "valeur continue précise (ex: 1,3295615) plutôt qu'une échelle "
+        "grossière (0/1/2/3) si tu en disposes : ça évite d'écraser de "
+        "l'information et donne une corrélation plus fiable. Ces valeurs ne "
         "sont pas calculées par l'application — ce sont tes constats terrain, "
         "utilisés uniquement pour l'onglet Corrélation ci-dessous."
     )
@@ -727,7 +729,7 @@ if uploaded_file is not None:
         df_defect_base,
         column_config={
             "Système / Machine": st.column_config.TextColumn(disabled=True),
-            "Niveau de défectivité": st.column_config.NumberColumn(min_value=0.0, step=1.0),
+            "Niveau de défectivité": st.column_config.NumberColumn(step=0.0000001, format="%.7f"),
         },
         use_container_width=True,
         hide_index=True,
@@ -900,11 +902,14 @@ if uploaded_file is not None:
         st.markdown("#### Corrélation entre les indicateurs calculés et tes constats de défectivité")
         st.caption(
             "Objectif : repérer quel(s) indicateur(s) varient le plus avec le "
-            "niveau de défaut que tu observes sur le terrain. Coefficient de "
-            "corrélation de Pearson (-1 à +1) : proche de 0 = pas de lien "
-            "linéaire visible, proche de ±1 = lien fort. À interpréter avec "
-            "prudence avec peu de machines (le coefficient devient instable "
-            "en dessous d'une dizaine de points)."
+            "niveau de défaut que tu mesures sur le terrain. Deux coefficients "
+            "affichés (-1 à +1, proche de 0 = pas de lien) : **Pearson** suppose "
+            "une relation linéaire et est sensible à l'échelle exacte des "
+            "valeurs ; **Spearman** ne regarde que l'ordre des valeurs (relation "
+            "monotone, pas forcément linéaire) et est plus robuste si tu n'es "
+            "pas sûr de la forme de la relation. À interpréter avec prudence "
+            "avec peu de machines (les deux deviennent instables en dessous "
+            "d'une dizaine de points)."
         )
 
         if df_res["Niveau de défectivité"].nunique() <= 1:
@@ -920,9 +925,14 @@ if uploaded_file is not None:
                 and pd.api.types.is_numeric_dtype(df_res[c])
             ]
 
-            matrice_corr = df_res[colonnes_indicateurs + ["Niveau de défectivité"]].corr(numeric_only=True)
+            matrice_pearson = df_res[colonnes_indicateurs + ["Niveau de défectivité"]].corr(
+                method="pearson", numeric_only=True
+            )
+            matrice_spearman = df_res[colonnes_indicateurs + ["Niveau de défectivité"]].corr(
+                method="spearman", numeric_only=True
+            )
 
-            if "Niveau de défectivité" not in matrice_corr.columns:
+            if "Niveau de défectivité" not in matrice_pearson.columns:
                 st.warning(
                     "Impossible de calculer la corrélation : la colonne 'Niveau de "
                     "défectivité' n'a pas pu être traitée comme numérique. "
@@ -931,27 +941,31 @@ if uploaded_file is not None:
                 )
                 correlations = pd.Series(dtype=float)
             else:
-                correlations = (
-                    matrice_corr["Niveau de défectivité"]
-                    .drop("Niveau de défectivité")
-                    .dropna()
-                    .sort_values(key=lambda s: s.abs(), ascending=False)
-                )
+                pearson_s = matrice_pearson["Niveau de défectivité"].drop("Niveau de défectivité")
+                spearman_s = matrice_spearman["Niveau de défectivité"].drop("Niveau de défectivité")
+                correlations = pearson_s.dropna().sort_values(key=lambda s: s.abs(), ascending=False)
 
             if correlations.empty:
-                if "Niveau de défectivité" in matrice_corr.columns:
+                if "Niveau de défectivité" in matrice_pearson.columns:
                     st.info("Pas assez de variation dans les données pour calculer une corrélation exploitable.")
             else:
-                df_corr = correlations.reset_index()
-                df_corr.columns = ["Indicateur", "Corrélation avec la défectivité"]
+                df_corr = pd.DataFrame({
+                    "Indicateur": correlations.index,
+                    "Pearson (linéaire)": correlations.values,
+                    "Spearman (monotone)": spearman_s.reindex(correlations.index).values,
+                })
+                df_corr_melted = df_corr.melt(
+                    id_vars="Indicateur", value_vars=["Pearson (linéaire)", "Spearman (monotone)"],
+                    var_name="Méthode", value_name="Coefficient de corrélation",
+                )
 
                 fig_corr = px.bar(
-                    df_corr, x="Corrélation avec la défectivité", y="Indicateur",
-                    orientation="h", title="Indicateurs classés par force de corrélation (valeur absolue)",
-                    color="Corrélation avec la défectivité", color_continuous_scale="RdBu_r",
-                    range_color=[-1, 1],
+                    df_corr_melted, x="Coefficient de corrélation", y="Indicateur",
+                    color="Méthode", barmode="group",
+                    orientation="h", title="Indicateurs classés par force de corrélation (tri sur Pearson)",
+                    range_x=[-1, 1],
                 )
-                fig_corr.update_layout(yaxis={"categoryorder": "total ascending"})
+                fig_corr.update_layout(yaxis={"categoryorder": "array", "categoryarray": correlations.index[::-1].tolist()})
                 st.plotly_chart(fig_corr, use_container_width=True)
 
                 st.markdown("##### Nuage de points — inspection détaillée d'un indicateur")
