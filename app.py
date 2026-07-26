@@ -707,8 +707,13 @@ if uploaded_file is not None:
         df_defect_importe, on="Système / Machine", how="left"
     )
     if "Niveau de défectivité" not in df_defect_base.columns:
-        df_defect_base["Niveau de défectivité"] = pd.NA
-    df_defect_base["Niveau de défectivité"] = df_defect_base["Niveau de défectivité"].fillna(0.0)
+        df_defect_base["Niveau de défectivité"] = 0.0
+    # Cast explicite en float : un merge avec un DataFrame vide (avant tout
+    # import) peut laisser la colonne en dtype "object", ce qui la fait
+    # silencieusement disparaître de df.corr(numeric_only=True) plus loin.
+    df_defect_base["Niveau de défectivité"] = pd.to_numeric(
+        df_defect_base["Niveau de défectivité"], errors="coerce"
+    ).fillna(0.0)
 
     st.markdown("---")
     st.subheader("🔗 Journal de Défectivité")
@@ -728,6 +733,12 @@ if uploaded_file is not None:
         hide_index=True,
         key="editeur_defectivite",
     )
+    # Re-cast après l'édition : st.data_editor peut renvoyer un dtype object
+    # selon les versions de Streamlit/pandas, même avec une NumberColumn.
+    df_defect_edite["Niveau de défectivité"] = pd.to_numeric(
+        df_defect_edite["Niveau de défectivité"], errors="coerce"
+    ).fillna(0.0)
+
     csv_defect_bytes = df_defect_edite.to_csv(index=False).encode("utf-8")
     st.download_button(
         "💾 Télécharger le journal de défectivité (CSV) — à réimporter la prochaine fois",
@@ -737,6 +748,9 @@ if uploaded_file is not None:
     )
 
     df_res = df_res.merge(df_defect_edite, on="Système / Machine", how="left")
+    df_res["Niveau de défectivité"] = pd.to_numeric(
+        df_res["Niveau de défectivité"], errors="coerce"
+    ).fillna(0.0)
 
     st.subheader("📋 Tableau Synthétique - Indicateurs Électromécaniques")
     if normaliser_dc:
@@ -906,42 +920,63 @@ if uploaded_file is not None:
                 and pd.api.types.is_numeric_dtype(df_res[c])
             ]
 
-            correlations = (
-                df_res[colonnes_indicateurs + ["Niveau de défectivité"]]
-                .corr(numeric_only=True)["Niveau de défectivité"]
-                .drop("Niveau de défectivité")
-                .dropna()
-                .sort_values(key=lambda s: s.abs(), ascending=False)
-            )
+            matrice_corr = df_res[colonnes_indicateurs + ["Niveau de défectivité"]].corr(numeric_only=True)
 
-            df_corr = correlations.reset_index()
-            df_corr.columns = ["Indicateur", "Corrélation avec la défectivité"]
+            if "Niveau de défectivité" not in matrice_corr.columns:
+                st.warning(
+                    "Impossible de calculer la corrélation : la colonne 'Niveau de "
+                    "défectivité' n'a pas pu être traitée comme numérique. "
+                    "Réessaie après avoir vérifié les valeurs saisies dans le "
+                    "journal ci-dessus (uniquement des nombres)."
+                )
+                correlations = pd.Series(dtype=float)
+            else:
+                correlations = (
+                    matrice_corr["Niveau de défectivité"]
+                    .drop("Niveau de défectivité")
+                    .dropna()
+                    .sort_values(key=lambda s: s.abs(), ascending=False)
+                )
 
-            fig_corr = px.bar(
-                df_corr, x="Corrélation avec la défectivité", y="Indicateur",
-                orientation="h", title="Indicateurs classés par force de corrélation (valeur absolue)",
-                color="Corrélation avec la défectivité", color_continuous_scale="RdBu_r",
-                range_color=[-1, 1],
-            )
-            fig_corr.update_layout(yaxis={"categoryorder": "total ascending"})
-            st.plotly_chart(fig_corr, use_container_width=True)
+            if correlations.empty:
+                if "Niveau de défectivité" in matrice_corr.columns:
+                    st.info("Pas assez de variation dans les données pour calculer une corrélation exploitable.")
+            else:
+                df_corr = correlations.reset_index()
+                df_corr.columns = ["Indicateur", "Corrélation avec la défectivité"]
 
-            st.markdown("##### Nuage de points — inspection détaillée d'un indicateur")
-            indicateur_focus = st.selectbox(
-                "Indicateur à inspecter :", options=df_corr["Indicateur"].tolist(),
-            )
-            fig_scatter = px.scatter(
-                df_res, x="Niveau de défectivité", y=indicateur_focus,
-                text="Système / Machine", title=f"{indicateur_focus} vs Niveau de défectivité",
-                trendline="ols",
-            )
-            fig_scatter.update_traces(textposition="top center")
-            st.plotly_chart(fig_scatter, use_container_width=True)
+                fig_corr = px.bar(
+                    df_corr, x="Corrélation avec la défectivité", y="Indicateur",
+                    orientation="h", title="Indicateurs classés par force de corrélation (valeur absolue)",
+                    color="Corrélation avec la défectivité", color_continuous_scale="RdBu_r",
+                    range_color=[-1, 1],
+                )
+                fig_corr.update_layout(yaxis={"categoryorder": "total ascending"})
+                st.plotly_chart(fig_corr, use_container_width=True)
 
-            st.caption(
-                "La droite de tendance (régression linéaire) est indicative : "
-                "avec peu de machines, ne pas sur-interpréter sa pente."
-            )
+                st.markdown("##### Nuage de points — inspection détaillée d'un indicateur")
+                indicateur_focus = st.selectbox(
+                    "Indicateur à inspecter :", options=df_corr["Indicateur"].tolist(),
+                )
+                try:
+                    fig_scatter = px.scatter(
+                        df_res, x="Niveau de défectivité", y=indicateur_focus,
+                        text="Système / Machine", title=f"{indicateur_focus} vs Niveau de défectivité",
+                        trendline="ols",
+                    )
+                except Exception:
+                    # Repli si statsmodels n'est pas installé (trendline indisponible)
+                    fig_scatter = px.scatter(
+                        df_res, x="Niveau de défectivité", y=indicateur_focus,
+                        text="Système / Machine", title=f"{indicateur_focus} vs Niveau de défectivité",
+                    )
+                fig_scatter.update_traces(textposition="top center")
+                st.plotly_chart(fig_scatter, use_container_width=True)
+
+                st.caption(
+                    "La droite de tendance (régression linéaire) est indicative : "
+                    "avec peu de machines, ne pas sur-interpréter sa pente."
+                )
 
     st.markdown("---")
     st.subheader("📥 Exportation des Résultats & Rapports Complets")
