@@ -726,24 +726,27 @@ if uploaded_file is not None:
     if "Niveau de défectivité" not in df_defect_base.columns:
         df_defect_base["Niveau de défectivité"] = 0.0
     
+    # FORCER LE TYPE FLOAT ICI POUR AUTORISER LA SAISIE DE DÉCIMALES
     df_defect_base["Niveau de défectivité"] = pd.to_numeric(
         df_defect_base["Niveau de défectivité"], errors="coerce"
-    ).fillna(0.0)
+    ).astype(float).fillna(0.0)
 
     st.markdown("---")
     st.subheader("🔗 Journal de Défectivité")
     st.caption(
         "Renseigne un niveau de défaut mesuré par système. Privilégie une "
         "valeur continue précise (ex: 1,3295615) plutôt qu'une échelle "
-        "grossière (0/1/2/3) si tu en disposes : ça évite d'écraser de "
-        "l'information et donne une corrélation plus fiable."
+        "grossière (0/1/2/3) si tu en disposes."
     )
     
     df_defect_edite = st.data_editor(
         df_defect_base,
         column_config={
             "Système / Machine": st.column_config.TextColumn(disabled=True),
-            "Niveau de défectivité": st.column_config.NumberColumn(step=0.0000001, format="%.7f"),
+            "Niveau de défectivité": st.column_config.NumberColumn(
+                step=0.0000001, 
+                format="%.6f"
+            ),
         },
         use_container_width=True,
         hide_index=True,
@@ -753,7 +756,7 @@ if uploaded_file is not None:
     # RE-CAST APRÈS ÉDITION & FUSION DANS LE DATAFRAME GLOBAL
     df_defect_edite["Niveau de défectivité"] = pd.to_numeric(
         df_defect_edite["Niveau de défectivité"], errors="coerce"
-    ).fillna(0.0)
+    ).astype(float).fillna(0.0)
 
     # Suppression de l'ancienne colonne si elle existait déjà avant merge pour éviter les doublons _x/_y
     if "Niveau de défectivité" in df_res.columns:
@@ -762,7 +765,7 @@ if uploaded_file is not None:
     df_res = df_res.merge(df_defect_edite, on="Système / Machine", how="left")
     df_res["Niveau de défectivité"] = pd.to_numeric(
         df_res["Niveau de défectivité"], errors="coerce"
-    ).fillna(0.0)
+    ).astype(float).fillna(0.0)
 
     csv_defect_bytes = df_defect_edite.to_csv(index=False).encode("utf-8")
     st.download_button(
@@ -788,7 +791,7 @@ if uploaded_file is not None:
         df_res,
         use_container_width=True,
         column_config={
-            "Niveau de défectivité": st.column_config.NumberColumn(format="%.7f"),
+            "Niveau de défectivité": st.column_config.NumberColumn(format="%.6f"),
         },
     )
 
@@ -918,9 +921,7 @@ if uploaded_file is not None:
         st.markdown("#### Corrélation entre les indicateurs calculés et tes constats de défectivité")
         st.caption(
             "Objectif : repérer quel(s) indicateur(s) varient le plus avec le "
-            "niveau de défaut que tu mesures sur le terrain. Deux coefficients "
-            "affichés (-1 à +1, proche de 0 = pas de lien) : **Pearson** (linéaire) "
-            "et **Spearman** (monotone)."
+            "niveau de défaut que tu mesures sur le terrain."
         )
 
         if df_res["Niveau de défectivité"].nunique() <= 1:
@@ -973,7 +974,7 @@ if uploaded_file is not None:
 
                 st.markdown("##### Nuage de points — inspection détaillée d'un indicateur")
                 indicateur_focus = st.selectbox(
-                    "Indicateur à inspecter :", options=df_corr["Indicateur"].tolist(),
+                    "Indicateur à inspecter :", options=df_corr["Indicateur"].tolist(), key="select_indicateur_focus"
                 )
                 try:
                     fig_scatter = px.scatter(
