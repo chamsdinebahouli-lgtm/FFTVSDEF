@@ -691,8 +691,8 @@ if uploaded_file is not None:
     df_res = pd.DataFrame(lignes)
 
     # -------------------------------------------------------------------
-    # JOURNAL DE DÉFECTIVITÉ : constats terrain saisis manuellement,
-    # pour tenter des corrélations avec les indicateurs calculés.
+    # JOURNAL DE DÉFECTIVITÉ : géré via TextColumn pour permettre 
+    # la saisie et l'édition libre de valeurs décimales précises.
     # -------------------------------------------------------------------
     if fichier_defectivite is not None:
         df_defect_importe = None
@@ -711,11 +711,6 @@ if uploaded_file is not None:
                 derniere_erreur = exc
 
         if df_defect_importe is None:
-            st.sidebar.warning(
-                "Journal de défectivité illisible : vérifie que les colonnes "
-                "s'appellent exactement 'Système / Machine' et 'Niveau de "
-                f"défectivité'. Erreur technique : {derniere_erreur}"
-            )
             df_defect_importe = pd.DataFrame(columns=["Système / Machine", "Niveau de défectivité"])
     else:
         df_defect_importe = pd.DataFrame(columns=["Système / Machine", "Niveau de défectivité"])
@@ -726,39 +721,39 @@ if uploaded_file is not None:
     if "Niveau de défectivité" not in df_defect_base.columns:
         df_defect_base["Niveau de défectivité"] = 0.0
     
-    # FORCER LE TYPE FLOAT ICI POUR AUTORISER LA SAISIE DE DÉCIMALES
+    # Nettoyage et conversion initiale en float
     df_defect_base["Niveau de défectivité"] = pd.to_numeric(
         df_defect_base["Niveau de défectivité"], errors="coerce"
     ).astype(float).fillna(0.0)
 
+    # Conversion temporaire en texte formaté pour contourner le blocage entier de l'éditeur Streamlit
+    df_defect_base["Niveau de défectivité"] = df_defect_base["Niveau de défectivité"].apply(lambda x: f"{x:.6f}")
+
     st.markdown("---")
     st.subheader("🔗 Journal de Défectivité")
     st.caption(
-        "Renseigne un niveau de défaut mesuré par système. Privilégie une "
-        "valeur continue précise (ex: 1,3295615) plutôt qu'une échelle "
-        "grossière (0/1/2/3) si tu en disposes."
+        "Renseigne un niveau de défaut mesuré par système. Vous pouvez saisir "
+        "librement des valeurs décimales précises (ex: 0.123456)."
     )
     
     df_defect_edite = st.data_editor(
         df_defect_base,
         column_config={
             "Système / Machine": st.column_config.TextColumn(disabled=True),
-            "Niveau de défectivité": st.column_config.NumberColumn(
-                step=0.0000001, 
-                format="%.6f"
-            ),
+            "Niveau de défectivité": st.column_config.TextColumn("Niveau de défectivité"),
         },
         use_container_width=True,
         hide_index=True,
         key="editeur_defectivite",
     )
     
-    # RE-CAST APRÈS ÉDITION & FUSION DANS LE DATAFRAME GLOBAL
+    # RE-CONVERSION EN NUMÉRIQUE (FLOAT) APRÈS MODIFICATION PAR L'UTILISATEUR
     df_defect_edite["Niveau de défectivité"] = pd.to_numeric(
-        df_defect_edite["Niveau de défectivité"], errors="coerce"
+        df_defect_edite["Niveau de défectivité"].str.replace(",", "."), 
+        errors="coerce"
     ).astype(float).fillna(0.0)
 
-    # Suppression de l'ancienne colonne si elle existait déjà avant merge pour éviter les doublons _x/_y
+    # Suppression de l'ancienne colonne si elle existait déjà pour éviter les doublons
     if "Niveau de défectivité" in df_res.columns:
         df_res = df_res.drop(columns=["Niveau de défectivité"])
 
