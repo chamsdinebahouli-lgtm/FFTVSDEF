@@ -388,7 +388,7 @@ def generer_pdf_rapport_complet(
 
     cols_a_afficher = [
         "Système / Machine", "Offset DC (V)", "RMS Total (V)", "Crest Factor",
-        "Kurtosis", "État", "Somme des amplitudes (indicatif)",
+        "Kurtosis", "Somme des amplitudes (indicatif)",
     ]
     cols_pdf = [c for c in cols_a_afficher if c in df_res.columns]
 
@@ -606,24 +606,19 @@ afficher_seuil = st.sidebar.checkbox(
     "du lot, pas un seuil de maintenance absolu.",
 )
 
-st.sidebar.markdown("---")
-st.sidebar.header("🎯 Seuils Absolus (optionnel)")
-st.sidebar.caption(
-    f"Seuil empirique par composant, dans l'unité sélectionnée ({unite_amplitude}). "
-    "Laisse à 0 pour ne pas l'utiliser. Ce sont des seuils internes à documenter "
-    "et affiner avec le temps — aucune norme ne s'applique à ce type de signal."
-)
-seuils_absolus: dict[str, float] = {}
-for nom_composant in FREQS_CIBLES:
-    val = st.sidebar.number_input(
-        f"Seuil — {nom_composant} ({unite_amplitude})",
-        min_value=0.0, value=0.0, step=0.01,
-        key=f"seuil_{nom_composant}_{unite_amplitude}",
-    )
-    if val > 0:
-        seuils_absolus[nom_composant] = val
-
 uploaded_file = st.sidebar.file_uploader("Importer le fichier Excel (.xlsx)", type=["xlsx", "xls"])
+
+st.sidebar.markdown("---")
+st.sidebar.header("🔗 Journal de Défectivité (optionnel)")
+st.sidebar.caption(
+    "Constats terrain (défauts observés hors de cette application), pour "
+    "tenter des corrélations avec les indicateurs calculés. Renseigne un "
+    "niveau par système dans le tableau principal, puis exporte le journal "
+    "pour le réimporter la prochaine fois."
+)
+fichier_defectivite = st.sidebar.file_uploader(
+    "Importer un journal existant (CSV)", type=["csv"], key="import_defectivite"
+)
 
 
 @st.cache_data(show_spinner=False)
@@ -691,12 +686,57 @@ if uploaded_file is not None:
         for comp, val in amplitudes_cibles.items():
             ligne[comp] = round(val, 5)
 
-        depassements = [comp for comp, seuil in seuils_absolus.items() if amplitudes_cibles.get(comp, 0) > seuil]
-        ligne["État"] = f"⚠️ Dépassement : {', '.join(depassements)}" if depassements else "✅ OK"
-
         lignes.append(ligne)
 
     df_res = pd.DataFrame(lignes)
+
+    # -------------------------------------------------------------------
+    # JOURNAL DE DÉFECTIVITÉ : constats terrain saisis manuellement,
+    # pour tenter des corrélations avec les indicateurs calculés.
+    # -------------------------------------------------------------------
+    if fichier_defectivite is not None:
+        try:
+            df_defect_importe = pd.read_csv(fichier_defectivite)
+        except Exception as exc:
+            st.sidebar.warning(f"Journal de défectivité illisible : {exc}")
+            df_defect_importe = pd.DataFrame(columns=["Système / Machine", "Niveau de défectivité"])
+    else:
+        df_defect_importe = pd.DataFrame(columns=["Système / Machine", "Niveau de défectivité"])
+
+    df_defect_base = df_res[["Système / Machine"]].merge(
+        df_defect_importe, on="Système / Machine", how="left"
+    )
+    if "Niveau de défectivité" not in df_defect_base.columns:
+        df_defect_base["Niveau de défectivité"] = pd.NA
+    df_defect_base["Niveau de défectivité"] = df_defect_base["Niveau de défectivité"].fillna(0.0)
+
+    st.markdown("---")
+    st.subheader("🔗 Journal de Défectivité")
+    st.caption(
+        "Renseigne un niveau de défaut observé par système (échelle libre, "
+        "ex: 0 = sain, 1 = léger, 2 = modéré, 3 = sévère). Ces valeurs ne "
+        "sont pas calculées par l'application — ce sont tes constats terrain, "
+        "utilisés uniquement pour l'onglet Corrélation ci-dessous."
+    )
+    df_defect_edite = st.data_editor(
+        df_defect_base,
+        column_config={
+            "Système / Machine": st.column_config.TextColumn(disabled=True),
+            "Niveau de défectivité": st.column_config.NumberColumn(min_value=0.0, step=1.0),
+        },
+        use_container_width=True,
+        hide_index=True,
+        key="editeur_defectivite",
+    )
+    csv_defect_bytes = df_defect_edite.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "💾 Télécharger le journal de défectivité (CSV) — à réimporter la prochaine fois",
+        data=csv_defect_bytes,
+        file_name="journal_defectivite.csv",
+        mime="text/csv",
+    )
+
+    df_res = df_res.merge(df_defect_edite, on="Système / Machine", how="left")
 
     st.subheader("📋 Tableau Synthétique - Indicateurs Électromécaniques")
     if normaliser_dc:
@@ -762,10 +802,11 @@ if uploaded_file is not None:
         if metrique_maitresse in df_res.columns else []
     )
 
-    tab1, tab2, tab3 = st.tabs([
+    tab1, tab2, tab3, tab4 = st.tabs([
         f"📊 Classement Global ({metrique_maitresse})",
         "📶 Spectre des Fréquences Cibles",
         "🔍 Focus par Composant Mécanique",
+        "🔗 Corrélation avec Défectivité",
     ])
 
     with tab1:
@@ -822,33 +863,85 @@ if uploaded_file is not None:
                 title=f"Zoom sur : {composant_selectionne}", text_auto=".4f",
             )
 
-            seuil_absolu = seuils_absolus.get(composant_selectionne)
-            if seuil_absolu:
-                fig_single.add_hline(
-                    y=seuil_absolu, line_dash="solid", line_color="darkred",
-                    annotation_text=f"Seuil : {seuil_absolu:.4f} {unite_amplitude}",
-                    annotation_position="top right",
-                )
-            else:
-                valeurs_stats = df_filtre[f"Amplitude ({unite_amplitude})"]
-                if len(valeurs_stats) > 0:
-                    moy_comp, std_comp = valeurs_stats.mean(), valeurs_stats.std()
-                    if afficher_moyenne:
-                        fig_single.add_hline(
-                            y=moy_comp, line_dash="dash", line_color="blue",
-                            annotation_text=f"Moyenne du lot: {moy_comp:.4f}", annotation_position="bottom right",
-                        )
-                    if afficher_seuil and not pd.isna(std_comp):
-                        fig_single.add_hline(
-                            y=moy_comp + std_comp, line_dash="dot", line_color="orange",
-                            annotation_text=f"Atypique du lot (Moy+σ): {moy_comp + std_comp:.4f}",
-                            annotation_position="top right",
-                        )
-                    st.caption("Aucun seuil absolu renseigné pour ce composant : repère statistique relatif au lot importé affiché à la place.")
+            valeurs_stats = df_filtre[f"Amplitude ({unite_amplitude})"]
+            if len(valeurs_stats) > 0:
+                moy_comp, std_comp = valeurs_stats.mean(), valeurs_stats.std()
+                if afficher_moyenne:
+                    fig_single.add_hline(
+                        y=moy_comp, line_dash="dash", line_color="blue",
+                        annotation_text=f"Moyenne du lot: {moy_comp:.4f}", annotation_position="bottom right",
+                    )
+                if afficher_seuil and not pd.isna(std_comp):
+                    fig_single.add_hline(
+                        y=moy_comp + std_comp, line_dash="dot", line_color="orange",
+                        annotation_text=f"Atypique du lot (Moy+σ): {moy_comp + std_comp:.4f}",
+                        annotation_position="top right",
+                    )
 
             st.plotly_chart(fig_single, use_container_width=True)
         else:
             st.info("Aucune donnée disponible pour l'analyse ciblée.")
+
+    with tab4:
+        st.markdown("#### Corrélation entre les indicateurs calculés et tes constats de défectivité")
+        st.caption(
+            "Objectif : repérer quel(s) indicateur(s) varient le plus avec le "
+            "niveau de défaut que tu observes sur le terrain. Coefficient de "
+            "corrélation de Pearson (-1 à +1) : proche de 0 = pas de lien "
+            "linéaire visible, proche de ±1 = lien fort. À interpréter avec "
+            "prudence avec peu de machines (le coefficient devient instable "
+            "en dessous d'une dizaine de points)."
+        )
+
+        if df_res["Niveau de défectivité"].nunique() <= 1:
+            st.info(
+                "Renseigne des niveaux de défectivité différents d'au moins deux "
+                "systèmes dans le journal ci-dessus pour activer l'analyse de "
+                "corrélation."
+            )
+        else:
+            colonnes_indicateurs = [
+                c for c in df_res.columns
+                if c not in ("Système / Machine", "Niveau de défectivité")
+                and pd.api.types.is_numeric_dtype(df_res[c])
+            ]
+
+            correlations = (
+                df_res[colonnes_indicateurs + ["Niveau de défectivité"]]
+                .corr(numeric_only=True)["Niveau de défectivité"]
+                .drop("Niveau de défectivité")
+                .dropna()
+                .sort_values(key=lambda s: s.abs(), ascending=False)
+            )
+
+            df_corr = correlations.reset_index()
+            df_corr.columns = ["Indicateur", "Corrélation avec la défectivité"]
+
+            fig_corr = px.bar(
+                df_corr, x="Corrélation avec la défectivité", y="Indicateur",
+                orientation="h", title="Indicateurs classés par force de corrélation (valeur absolue)",
+                color="Corrélation avec la défectivité", color_continuous_scale="RdBu_r",
+                range_color=[-1, 1],
+            )
+            fig_corr.update_layout(yaxis={"categoryorder": "total ascending"})
+            st.plotly_chart(fig_corr, use_container_width=True)
+
+            st.markdown("##### Nuage de points — inspection détaillée d'un indicateur")
+            indicateur_focus = st.selectbox(
+                "Indicateur à inspecter :", options=df_corr["Indicateur"].tolist(),
+            )
+            fig_scatter = px.scatter(
+                df_res, x="Niveau de défectivité", y=indicateur_focus,
+                text="Système / Machine", title=f"{indicateur_focus} vs Niveau de défectivité",
+                trendline="ols",
+            )
+            fig_scatter.update_traces(textposition="top center")
+            st.plotly_chart(fig_scatter, use_container_width=True)
+
+            st.caption(
+                "La droite de tendance (régression linéaire) est indicative : "
+                "avec peu de machines, ne pas sur-interpréter sa pente."
+            )
 
     st.markdown("---")
     st.subheader("📥 Exportation des Résultats & Rapports Complets")
