@@ -485,7 +485,7 @@ def generer_html_rapport_complet(df_res: pd.DataFrame, resultats_bruts: list[dic
 # =============================================================================
 
 FREQS_CIBLES = {
-    "Rotation 1 tr/min door (0.0167 Hz)": 0.016759,
+    "Rotation 1 tr/min (0.0167 Hz)": 0.016759,
     "1er étage réducteur (3.68 Hz)": 3.68,
     "Dernier étage réducteur (12.33 Hz)": 12.33,
     "Moteur / Commutation (13.67 Hz)": 13.67,
