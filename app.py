@@ -79,13 +79,25 @@ def detecter_dt(temps: np.ndarray, unite: UniteTemps = UniteTemps.MILLISECONDES)
 
 
 def calculer_metriques_avancees(signal: np.ndarray, resultat_fft: ResultatFFT) -> dict[str, float]:
-    """Calcule l'ensemble des indicateurs statistiques et électriques avancés."""
+    """Calcule l'ensemble des indicateurs statistiques et électriques avancés de façon sécurisée."""
     x = np.asarray(signal, dtype=float)
     x = x[~np.isnan(x)]
     n = len(x)
 
     if n == 0:
-        return {}
+        return {
+            "Offset DC (V)": 0.0,
+            "RMS Total (V)": 0.0,
+            "RMS AC (V)": 0.0,
+            "Peak (V)": 0.0,
+            "Peak-to-Peak (V)": 0.0,
+            "Crest Factor": 1.0,
+            "Kurtosis": 3.0,
+            "Skewness": 0.0,
+            "THD (%)": 0.0,
+            "SNR (dB)": 0.0,
+            "Énergie AC": 0.0,
+        }
 
     # 1. Offset DC & Énergies
     dc_val = float(np.mean(x))
@@ -107,7 +119,6 @@ def calculer_metriques_avancees(signal: np.ndarray, resultat_fft: ResultatFFT) -
         crest_factor = 1.0
 
     # 4. Indicateurs statistiques de forme (Kurtosis & Skewness)
-    # Fisher=True par défaut dans scipy (kurtosis d'une loi normale = 0, on ajoute 3 pour la convention mécanique où Normal = 3)
     kurt = float(kurtosis(x, fisher=False, bias=False)) if n > 3 else 3.0
     skw = float(skew(x, bias=False)) if n > 2 else 0.0
 
@@ -115,14 +126,10 @@ def calculer_metriques_avancees(signal: np.ndarray, resultat_fft: ResultatFFT) -
     freq, amp = resultat_fft.freq, resultat_fft.amplitude
     energie_totale_spec = float(np.sum(amp**2))
     
-    # Estimation du bruit vs signal utile via la variance spectrale
     if energie_totale_spec > 1e-9:
-        # On approxime le bruit par la médiane ou la partie non-fondamentale
         bruit_estime = float(np.median(amp)) if len(amp) > 0 else 0.0
         signal_utile_estime = float(np.max(amp))
         snr = float(20 * np.log10(signal_utile_estime / bruit_estime)) if bruit_estime > 1e-9 else 0.0
-        
-        # THD simplifié : rapport de l'énergie hors pic principal sur l'énergie totale spectrale
         thd = float((np.sqrt(max(0, energie_totale_spec - signal_utile_estime**2)) / (signal_utile_estime + 1e-9)) * 100.0)
     else:
         snr = 0.0
