@@ -79,75 +79,73 @@ def detecter_dt(temps: np.ndarray, unite: UniteTemps = UniteTemps.MILLISECONDES)
 
 
 def calculer_metriques_avancees(signal: np.ndarray, resultat_fft: ResultatFFT) -> dict[str, float]:
-    """Calcule l'ensemble des indicateurs statistiques et électriques avancés de façon sécurisée."""
+    """Calcule l'ensemble des indicateurs statistiques et électriques avancés."""
     x = np.asarray(signal, dtype=float)
     x = x[~np.isnan(x)]
     n = len(x)
 
-    if n == 0:
-        return {
-            "Offset DC (V)": 0.0,
-            "RMS Total (V)": 0.0,
-            "RMS AC (V)": 0.0,
-            "Peak (V)": 0.0,
-            "Peak-to-Peak (V)": 0.0,
-            "Crest Factor": 1.0,
-            "Kurtosis": 3.0,
-            "Skewness": 0.0,
-            "THD (%)": 0.0,
-            "SNR (dB)": 0.0,
-            "Énergie AC": 0.0,
-        }
-
-    # 1. Offset DC & Énergies
-    dc_val = float(np.mean(x))
-    rms_total = float(np.sqrt(np.mean(x**2)))
-    
-    x_ac = x - dc_val
-    rms_ac = float(np.sqrt(np.mean(x_ac**2)))
-    energie_ac = float(np.sum(x_ac**2))
-
-    # 2. Amplitudes Extrêmes
-    peak_val = float(np.max(np.abs(x_ac)))
-    min_val, max_val = float(np.min(x)), float(np.max(x))
-    peak_to_peak = max_val - min_val
-
-    # 3. Facteur de Crête (Crest Factor)
-    if rms_ac > 1e-9:
-        crest_factor = float(peak_val / rms_ac)
-    else:
-        crest_factor = 1.0
-
-    # 4. Indicateurs statistiques de forme (Kurtosis & Skewness)
-    kurt = float(kurtosis(x, fisher=False, bias=False)) if n > 3 else 3.0
-    skw = float(skew(x, bias=False)) if n > 2 else 0.0
-
-    # 5. THD & SNR spectraux
-    freq, amp = resultat_fft.freq, resultat_fft.amplitude
-    energie_totale_spec = float(np.sum(amp**2))
-    
-    if energie_totale_spec > 1e-9:
-        bruit_estime = float(np.median(amp)) if len(amp) > 0 else 0.0
-        signal_utile_estime = float(np.max(amp))
-        snr = float(20 * np.log10(signal_utile_estime / bruit_estime)) if bruit_estime > 1e-9 else 0.0
-        thd = float((np.sqrt(max(0, energie_totale_spec - signal_utile_estime**2)) / (signal_utile_estime + 1e-9)) * 100.0)
-    else:
-        snr = 0.0
-        thd = 0.0
-
-    return {
-        "Offset DC (V)": dc_val,
-        "RMS Total (V)": rms_total,
-        "RMS AC (V)": rms_ac,
-        "Peak (V)": peak_val,
-        "Peak-to-Peak (V)": peak_to_peak,
-        "Crest Factor": crest_factor,
-        "Kurtosis": kurt,
-        "Skewness": skw,
-        "THD (%)": thd,
-        "SNR (dB)": snr,
-        "Énergie AC": energie_ac,
+    metriques_par_defaut = {
+        "Offset DC (V)": 0.0,
+        "RMS Total (V)": 0.0,
+        "RMS AC (V)": 0.0,
+        "Peak (V)": 0.0,
+        "Peak-to-Peak (V)": 0.0,
+        "Crest Factor": 1.0,
+        "Kurtosis": 3.0,
+        "Skewness": 0.0,
+        "THD (%)": 0.0,
+        "SNR (dB)": 0.0,
+        "Énergie AC": 0.0,
     }
+
+    if n == 0:
+        return metriques_par_defaut
+
+    try:
+        dc_val = float(np.mean(x))
+        rms_total = float(np.sqrt(np.mean(x**2)))
+        
+        x_ac = x - dc_val
+        rms_ac = float(np.sqrt(np.mean(x_ac**2)))
+        energie_ac = float(np.sum(x_ac**2))
+
+        peak_val = float(np.max(np.abs(x_ac)))
+        min_val, max_val = float(np.min(x)), float(np.max(x))
+        peak_to_peak = max_val - min_val
+
+        crest_factor = float(peak_val / rms_ac) if rms_ac > 1e-9 else 1.0
+
+        kurt = float(kurtosis(x, fisher=False, bias=False)) if n > 3 else 3.0
+        skw = float(skew(x, bias=False)) if n > 2 else 0.0
+
+        freq, amp = resultat_fft.freq, resultat_fft.amplitude
+        energie_totale_spec = float(np.sum(amp**2))
+        
+        if energie_totale_spec > 1e-9:
+            bruit_estime = float(np.median(amp)) if len(amp) > 0 else 0.0
+            signal_utile_estime = float(np.max(amp))
+            snr = float(20 * np.log10(signal_utile_estime / bruit_estime)) if bruit_estime > 1e-9 else 0.0
+            thd = float((np.sqrt(max(0, energie_totale_spec - signal_utile_estime**2)) / (signal_utile_estime + 1e-9)) * 100.0)
+        else:
+            snr = 0.0
+            thd = 0.0
+
+        return {
+            "Offset DC (V)": dc_val,
+            "RMS Total (V)": rms_total,
+            "RMS AC (V)": rms_ac,
+            "Peak (V)": peak_val,
+            "Peak-to-Peak (V)": peak_to_peak,
+            "Crest Factor": crest_factor,
+            "Kurtosis": kurt,
+            "Skewness": skw,
+            "THD (%)": thd,
+            "SNR (dB)": snr,
+            "Énergie AC": energie_ac,
+        }
+    except Exception as e:
+        logger.error(f"Erreur lors du calcul des métriques avancées : {e}")
+        return metriques_par_defaut
 
 
 def calculer_fft(signal: np.ndarray, dt: float, mode: ModeFFT) -> ResultatFFT:
@@ -219,13 +217,9 @@ def analyser_systeme(
     dt = detecter_dt(df[col_temps].values, unite=unite_temps)
     signal_brut = df[col_signal].values
 
-    # 1. Calcul de la FFT
     resultat_fft = calculer_fft(signal_brut, dt=dt, mode=mode)
-
-    # 2. Calcul des indicateurs avancés (Statistiques, Énergie, Forme, THD, SNR...)
     metriques = calculer_metriques_avancees(signal_brut, resultat_fft)
 
-    # 3. Extraction des amplitudes sur les fréquences cinématiques cibles (ex: 1 tr/min à 0.0167 Hz)
     amplitudes_cibles: dict[str, float] = {}
     alertes_resolution: list[str] = []
     tolerance_relative = 0.03
@@ -346,23 +340,23 @@ if uploaded_file is not None:
         st.error("Aucun onglet exploitable trouvé.")
         st.stop()
 
-    # Construction du tableau synthétique complet
+    # Construction du tableau synthétique complet sécurisée avec .get()
     lignes = []
     for r in resultats:
         ligne = {
-            "Système / Machine": r["nom"],
-            "Offset DC (V)": round(r["Offset DC (V)"], 4),
-            "RMS Total (V)": round(r["RMS Total (V)"], 4),
-            "RMS AC (V)": round(r["RMS AC (V)"], 4),
-            "Peak (V)": round(r["Peak (V)"], 4),
-            "Peak-to-Peak (V)": round(r["Peak-to-Peak (V)"], 4),
-            "Crest Factor": round(r["Crest Factor"], 3),
-            "Kurtosis": round(r["Kurtosis"], 3),
-            "Skewness": round(r["Skewness"], 3),
-            "THD (%)": round(r["THD (%)"], 2),
-            "SNR (dB)": round(r["SNR (dB)"], 2),
+            "Système / Machine": r.get("nom", "Inconnu"),
+            "Offset DC (V)": round(r.get("Offset DC (V)", 0.0), 4),
+            "RMS Total (V)": round(r.get("RMS Total (V)", 0.0), 4),
+            "RMS AC (V)": round(r.get("RMS AC (V)", 0.0), 4),
+            "Peak (V)": round(r.get("Peak (V)", 0.0), 4),
+            "Peak-to-Peak (V)": round(r.get("Peak-to-Peak (V)", 0.0), 4),
+            "Crest Factor": round(r.get("Crest Factor", 1.0), 3),
+            "Kurtosis": round(r.get("Kurtosis", 3.0), 3),
+            "Skewness": round(r.get("Skewness", 0.0), 3),
+            "THD (%)": round(r.get("THD (%)", 0.0), 2),
+            "SNR (dB)": round(r.get("SNR (dB)", 0.0), 2),
         }
-        for comp, val in r["cibles"].items():
+        for comp, val in r.get("cibles", {}).items():
             ligne[comp] = round(val, 5)
         lignes.append(ligne)
 
@@ -371,7 +365,6 @@ if uploaded_file is not None:
     st.subheader("📋 Tableau Synthétique - Indicateurs Électromécaniques Avancés")
     st.dataframe(df_res, use_container_width=True)
 
-    # Listes des colonnes métriques disponibles pour les graphiques
     metriques_disponibles = [
         "Kurtosis",
         "Crest Factor",
