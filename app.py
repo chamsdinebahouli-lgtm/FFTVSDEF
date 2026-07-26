@@ -2,7 +2,7 @@
 app.py
 ------
 Analyseur Électrique DC & Diagnostique Vibratoire - Application Streamlit (fichier unique).
-Intégration d'indicateurs avancés, Export CSV et Rapport PDF.
+Intégration d'indicateurs avancés, Export CSV et Rapport d'analyse.
 """
 
 from __future__ import annotations
@@ -19,11 +19,15 @@ import streamlit as st
 from scipy.fft import rfft, rfftfreq
 from scipy.stats import kurtosis, skew
 
-# Importation pour la génération du PDF avec ReportLab
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+# Importation optionnelle de ReportLab pour les PDF
+try:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    HAS_REPORTLAB = True
+except ImportError:
+    HAS_REPORTLAB = False
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -264,6 +268,9 @@ def lire_onglet(xls: pd.ExcelFile, nom_onglet: str) -> pd.DataFrame:
 
 def generer_pdf_rapport(df_res: pd.DataFrame, metrique_maitresse: str) -> bytes:
     """Génère un rapport PDF synthétique du parc machine."""
+    if not HAS_REPORTLAB:
+        raise RuntimeError("ReportLab non disponible.")
+    
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
     elements = []
@@ -319,7 +326,6 @@ def generer_pdf_rapport(df_res: pd.DataFrame, metrique_maitresse: str) -> bytes:
     elements.append(Spacer(1, 15))
     elements.append(Paragraph("Tableau Récapitulatif des Indicateurs Clés", heading_style))
 
-    # Sélectionner un sous-ensemble de colonnes pour le tableau PDF
     cols_a_afficher = ["Système / Machine", "Offset DC (V)", "RMS Total (V)", "Crest Factor", "Kurtosis", "THD (%)"]
     cols_pdf = [c for c in cols_a_afficher if c in df_res.columns]
 
@@ -346,6 +352,40 @@ def generer_pdf_rapport(df_res: pd.DataFrame, metrique_maitresse: str) -> bytes:
     doc.build(elements)
     buffer.seek(0)
     return buffer.getvalue()
+
+
+def generer_html_rapport(df_res: pd.DataFrame, metrique_maitresse: str) -> str:
+    """Génère un rapport HTML stylisé imprimable en PDF par le navigateur."""
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>Rapport de Diagnostic Électromécanique</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 30px; color: #1F2937; }}
+            h1 {{ color: #1E3A8A; text-align: center; }}
+            h2 {{ color: #1E3A8A; border-bottom: 2px solid #1E3A8A; padding-bottom: 5px; }}
+            table {{ width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 12px; }}
+            th, td {{ border: 1px solid #D1D5DB; padding: 8px; text-align: center; }}
+            th {{ background-color: #1E3A8A; color: white; }}
+            tr:nth-child(even) {{ background-color: #F3F4F6; }}
+            .summary {{ background: #EFF6FF; padding: 15px; border-radius: 5px; margin-bottom: 20px; }}
+        </style>
+    </head>
+    <body>
+        <h1>Rapport de Diagnostic Électromécanique & Vibratoire</h1>
+        <div class="summary">
+            <h2>Synthèse Globale</h2>
+            <p>Nombre de systèmes analysés : <b>{len(df_res)}</b></p>
+            <p>Indicateur maître : <b>{metrique_maitresse}</b></p>
+        </div>
+        <h2>Tableau Récapitulatif</h2>
+        {df_res.to_html(index=False, classes='table')}
+    </body>
+    </html>
+    """
+    return html
 
 
 # =============================================================================
@@ -432,7 +472,6 @@ if uploaded_file is not None:
         st.error("Aucun onglet exploitable trouvé.")
         st.stop()
 
-    # Construction du tableau synthétique complet sécurisée
     lignes = []
     for r in resultats:
         ligne = {
@@ -590,10 +629,10 @@ if uploaded_file is not None:
             st.info("Aucune donnée disponible pour l'analyse ciblée.")
 
     # =========================================================================
-    # EXPORTS : CSV & RAPPORT PDF
+    # EXPORTS : CSV & RAPPORT
     # =========================================================================
     st.markdown("---")
-    st.subheader("📥 Exportation des Résultats")
+    st.subheader("📥 Exportation des Résultats & Rapports")
 
     col_exp1, col_exp2 = st.columns(2)
 
@@ -608,17 +647,29 @@ if uploaded_file is not None:
         )
 
     with col_exp2:
-        try:
-            pdf_bytes = generer_pdf_rapport(df_res, metrique_maitresse)
+        if HAS_REPORTLAB:
+            try:
+                pdf_bytes = generer_pdf_rapport(df_res, metrique_maitresse)
+                st.download_button(
+                    label="📄 Télécharger le Rapport d'Analyse (PDF)",
+                    data=pdf_bytes,
+                    file_name="rapport_diagnostic_parc.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+            except Exception as e:
+                st.warning(f"Erreur de génération PDF : {e}")
+        else:
+            # Fallback rapport HTML (imprimable en PDF directement via le navigateur)
+            html_content = generer_html_rapport(df_res, metrique_maitresse)
             st.download_button(
-                label="📄 Télécharger le Rapport d'Analyse (PDF)",
-                data=pdf_bytes,
-                file_name="rapport_diagnostic_parc.pdf",
-                mime="application/pdf",
+                label="📄 Télécharger le Rapport d'Analyse (HTML / Imprimable PDF)",
+                data=html_content.encode("utf-8"),
+                file_name="rapport_diagnostic_parc.html",
+                mime="text/html",
                 use_container_width=True,
+                help="Ouvrez ce fichier dans votre navigateur puis faites Ctrl+P -> Enregistrer au format PDF.",
             )
-        except Exception as e:
-            st.warning(f"La génération du PDF nécessite le paquet `reportlab` ({e}).")
 
 else:
     st.info("👈 Veuillez importer votre fichier Excel dans la barre latérale pour lancer l'analyse avancée.")
