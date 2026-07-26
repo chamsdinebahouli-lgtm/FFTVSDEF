@@ -340,7 +340,7 @@ if uploaded_file is not None:
         st.error("Aucun onglet exploitable trouvé.")
         st.stop()
 
-    # Construction du tableau synthétique complet sécurisée avec .get()
+    # Construction du tableau synthétique complet sécurisée
     lignes = []
     for r in resultats:
         ligne = {
@@ -376,9 +376,12 @@ if uploaded_file is not None:
         "Offset DC (V)",
     ]
 
+    # Filtrage dynamique pour ne garder que les métriques réellement présentes dans df_res
+    metriques_existantes = [m for m in metriques_disponibles if m in df_res.columns]
     cols_cibles = list(FREQS_CIBLES.keys())
+
     df_melted = df_res.melt(
-        id_vars=["Système / Machine"] + metriques_disponibles,
+        id_vars=["Système / Machine"] + metriques_existantes,
         value_vars=cols_cibles,
         var_name="Composante / Fréquence Cible",
         value_name="Amplitude Spectrale (V)",
@@ -391,7 +394,7 @@ if uploaded_file is not None:
     with col_gauche:
         metrique_maitresse = st.selectbox(
             "Indicateur principal à analyser / classer :",
-            options=metriques_disponibles,
+            options=metriques_existantes if metriques_existantes else ["Système / Machine"],
             index=0,
             help="Sélectionnez un indicateur sensible aux chocs ou aux ondulations pour identifier les machines atypiques.",
         )
