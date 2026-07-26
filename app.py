@@ -2,7 +2,7 @@
 app.py
 ------
 Analyseur Électrique DC & Diagnostique Vibratoire - Application Streamlit (fichier unique).
-Intégration d'indicateurs avancés, Export CSV et Rapport Global & Détaillé complet.
+Intégration d'indicateurs avancés, de la Somme des amplitudes, Export CSV et Rapport Global complet.
 """
 
 from __future__ import annotations
@@ -89,7 +89,7 @@ def detecter_dt(temps: np.ndarray, unite: UniteTemps = UniteTemps.MILLISECONDES)
 
 
 def calculer_metriques_avancees(signal: np.ndarray, resultat_fft: ResultatFFT) -> dict[str, float]:
-    """Calcule l'ensemble des indicateurs statistiques et électriques avancés."""
+    """Calcule l'ensemble des indicateurs statistiques, électriques et la somme des amplitudes."""
     x = np.asarray(signal, dtype=float)
     x = x[~np.isnan(x)]
     n = len(x)
@@ -105,6 +105,7 @@ def calculer_metriques_avancees(signal: np.ndarray, resultat_fft: ResultatFFT) -
         "Skewness": 0.0,
         "THD (%)": 0.0,
         "SNR (dB)": 0.0,
+        "Somme des amplitudes": 0.0,
         "Énergie AC": 0.0,
     }
 
@@ -129,6 +130,7 @@ def calculer_metriques_avancees(signal: np.ndarray, resultat_fft: ResultatFFT) -
         skw = float(skew(x, bias=False)) if n > 2 else 0.0
 
         freq, amp = resultat_fft.freq, resultat_fft.amplitude
+        somme_amp = float(np.sum(amp))
         energie_totale_spec = float(np.sum(amp**2))
         
         if energie_totale_spec > 1e-9:
@@ -151,6 +153,7 @@ def calculer_metriques_avancees(signal: np.ndarray, resultat_fft: ResultatFFT) -
             "Skewness": skw,
             "THD (%)": thd,
             "SNR (dB)": snr,
+            "Somme des amplitudes": somme_amp,
             "Énergie AC": energie_ac,
         }
     except Exception as e:
@@ -267,7 +270,7 @@ def lire_onglet(xls: pd.ExcelFile, nom_onglet: str) -> pd.DataFrame:
 
 
 def generer_pdf_rapport_complet(df_res: pd.DataFrame, resultats_bruts: list[dict], metrique_maitresse: str) -> bytes:
-    """Génère un rapport PDF global et détaillé pour tout le parc (synthèse + fiches machines)."""
+    """Génère un rapport PDF global et détaillé pour tout le parc."""
     if not HAS_REPORTLAB:
         raise RuntimeError("ReportLab non disponible.")
     
@@ -327,7 +330,7 @@ def generer_pdf_rapport_complet(df_res: pd.DataFrame, resultats_bruts: list[dict
     elements.append(Spacer(1, 10))
     elements.append(Paragraph("2. Tableau Récapitulatif Global", heading_style))
 
-    cols_a_afficher = ["Système / Machine", "Offset DC (V)", "RMS Total (V)", "Crest Factor", "Kurtosis", "THD (%)"]
+    cols_a_afficher = ["Système / Machine", "Offset DC (V)", "RMS Total (V)", "Crest Factor", "Kurtosis", "THD (%)", "Somme des amplitudes"]
     cols_pdf = [c for c in cols_a_afficher if c in df_res.columns]
 
     data_table = [cols_pdf]
@@ -370,6 +373,7 @@ def generer_pdf_rapport_complet(df_res: pd.DataFrame, resultats_bruts: list[dict
             ["Skewness", f"{r.get('Skewness', 0):.3f}"],
             ["THD (%)", f"{r.get('THD (%)', 0):.2f}%"],
             ["SNR (dB)", f"{r.get('SNR (dB)', 0):.2f} dB"],
+            ["Somme des amplitudes", f"{r.get('Somme des amplitudes', 0):.4f}"],
         ]
         t_met = Table(fiche_metriques, repeatRows=1)
         t_met.setStyle(TableStyle([
@@ -461,6 +465,7 @@ def generer_html_rapport_complet(df_res: pd.DataFrame, resultats_bruts: list[dic
             <tr><td>Skewness</td><td>{r.get('Skewness', 0):.3f}</td></tr>
             <tr><td>THD (%)</td><td>{r.get('THD (%)', 0):.2f}%</td></tr>
             <tr><td>SNR (dB)</td><td>{r.get('SNR (dB)', 0):.2f} dB</td></tr>
+            <tr><td>Somme des amplitudes</td><td>{r.get('Somme des amplitudes', 0):.4f}</td></tr>
         </table>
         <h2>Amplitudes Spectrales par Composante</h2>
         <table>
@@ -487,7 +492,7 @@ FREQS_CIBLES = {
 
 st.set_page_config(page_title="Diagnostic Électromécanique DC & FFT", layout="wide")
 st.title("⚡ Analyseur Avancé : Couplage Électrique & Vibratoire (1 tr/min)")
-st.write("Suivi multi-indicateurs professionnels : Kurtosis, Facteur de Crête, THD, RMS et Analyse Spectrale.")
+st.write("Suivi multi-indicateurs professionnels : Kurtosis, Facteur de Crête, THD, Somme des amplitudes et Analyse Spectrale.")
 
 st.sidebar.header("⚙️ Paramètres")
 
@@ -572,6 +577,7 @@ if uploaded_file is not None:
             "Skewness": round(r.get("Skewness", 0.0), 3),
             "THD (%)": round(r.get("THD (%)", 0.0), 2),
             "SNR (dB)": round(r.get("SNR (dB)", 0.0), 2),
+            "Somme des amplitudes": round(r.get("Somme des amplitudes", 0.0), 4),
         }
         for comp, val in r.get("cibles", {}).items():
             ligne[comp] = round(val, 5)
@@ -589,6 +595,7 @@ if uploaded_file is not None:
         "Peak-to-Peak (V)",
         "THD (%)",
         "SNR (dB)",
+        "Somme des amplitudes",
         "RMS Total (V)",
         "Offset DC (V)",
     ]
@@ -617,7 +624,7 @@ if uploaded_file is not None:
             "Indicateur principal à analyser / classer :",
             options=metriques_existantes if metriques_existantes else ["Système / Machine"],
             index=0,
-            help="Sélectionnez un indicateur sensible aux chocs ou aux ondulations pour identifier les machines atypiques.",
+            help="Sélectionnez un indicateur sensible pour identifier les machines atypiques.",
         )
     with col_droite:
         sens_tri = st.radio("Ordre de classement :", ["Du plus faible au plus fort", "Du plus fort au plus faible"], horizontal=True)
