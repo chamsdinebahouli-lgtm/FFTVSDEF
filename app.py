@@ -340,7 +340,7 @@ if uploaded_file is not None:
         st.error("Aucun onglet exploitable trouvé.")
         st.stop()
 
-    # Construction du tableau synthétique complet sécurisée
+    # Construction du tableau synthétique complet sécurisée avec .get()
     lignes = []
     for r in resultats:
         ligne = {
@@ -376,22 +376,13 @@ if uploaded_file is not None:
         "Offset DC (V)",
     ]
 
-    metriques_existantes = [m for m in metriques_disponibles if m in df_res.columns]
-    
-    # Filtrage strict : ne garder que les colonnes cibles qui existent réellement dans le DataFrame
-    cols_cibles = [col for col in FREQS_CIBLES.keys() if col in df_res.columns]
-
-    if cols_cibles:
-        df_melted = pd.melt(
-            df_res,
-            id_vars=["Système / Machine"],
-            value_vars=cols_cibles,
-            var_name="Composante / Fréquence Cible",
-            value_name="Amplitude Spectrale (V)",
-        )
-        df_melted = df_melted.merge(df_res[["Système / Machine"] + metriques_existantes], on="Système / Machine", how="left")
-    else:
-        df_melted = pd.DataFrame(columns=["Système / Machine", "Composante / Fréquence Cible", "Amplitude Spectrale (V)"] + metriques_existantes)
+    cols_cibles = list(FREQS_CIBLES.keys())
+    df_melted = df_res.melt(
+        id_vars=["Système / Machine"] + metriques_disponibles,
+        value_vars=cols_cibles,
+        var_name="Composante / Fréquence Cible",
+        value_name="Amplitude Spectrale (V)",
+    )
 
     st.markdown("---")
     st.subheader("📈 Visualisation & Diagnostic Dynamique")
@@ -400,7 +391,7 @@ if uploaded_file is not None:
     with col_gauche:
         metrique_maitresse = st.selectbox(
             "Indicateur principal à analyser / classer :",
-            options=metriques_existantes if metriques_existantes else ["Système / Machine"],
+            options=metriques_disponibles,
             index=0,
             help="Sélectionnez un indicateur sensible aux chocs ou aux ondulations pour identifier les machines atypiques.",
         )
@@ -408,7 +399,7 @@ if uploaded_file is not None:
         sens_tri = st.radio("Ordre de classement :", ["Du plus faible au plus fort", "Du plus fort au plus faible"], horizontal=True)
 
     ascending_flag = True if sens_tri.startswith("Du plus faible") else False
-    ordre_systemes = df_res.sort_values(by=metrique_maitresse, ascending=ascending_flag)["Système / Machine"].tolist() if metrique_maitresse in df_res.columns else []
+    ordre_systemes = df_res.sort_values(by=metrique_maitresse, ascending=ascending_flag)["Système / Machine"].tolist()
 
     tab1, tab2, tab3 = st.tabs(
         [
@@ -456,19 +447,16 @@ if uploaded_file is not None:
 
     with tab2:
         st.markdown("#### Amplitudes spectrales par machine (Empilées)")
-        if not df_melted.empty:
-            fig_stacked = px.bar(
-                df_melted,
-                x="Système / Machine",
-                y="Amplitude Spectrale (V)",
-                color="Composante / Fréquence Cible",
-                title="Contribution des Fréquences Cibles (dont 1 tr/min)",
-                barmode="stack",
-                category_orders={"Système / Machine": ordre_systemes},
-            )
-            st.plotly_chart(fig_stacked, use_container_width=True)
-        else:
-            st.info("Aucune donnée spectrale disponible pour le graphique empilé.")
+        fig_stacked = px.bar(
+            df_melted,
+            x="Système / Machine",
+            y="Amplitude Spectrale (V)",
+            color="Composante / Fréquence Cible",
+            title="Contribution des Fréquences Cibles (dont 1 tr/min)",
+            barmode="stack",
+            category_orders={"Système / Machine": ordre_systemes},
+        )
+        st.plotly_chart(fig_stacked, use_container_width=True)
 
     with tab3:
         st.markdown("#### Analyse Ciblée par Composante Fréquentielle")
@@ -477,27 +465,25 @@ if uploaded_file is not None:
             options=["Toutes les composantes"] + cols_cibles,
         )
 
-        if not df_melted.empty:
-            if composant_selectionne == "Toutes les composantes":
-                df_filtre = df_melted
-                titre_f = "Toutes les fréquences cibles"
-            else:
-                df_filtre = df_melted[df_melted["Composante / Fréquence Cible"] == composant_selectionne]
-                df_filtre = df_filtre.sort_values(by="Amplitude Spectrale (V)", ascending=ascending_flag)
-                titre_f = f"Zoom sur : {composant_selectionne}"
-
-            fig_single = px.bar(
-                df_filtre,
-                x="Système / Machine",
-                y="Amplitude Spectrale (V)",
-                color="Composante / Fréquence Cible" if composant_selectionne == "Toutes les composantes" else None,
-                title=titre_f,
-                text_auto=".4f" if composant_selectionne != "Toutes les composantes" else False,
-                barmode="group",
-            )
-            st.plotly_chart(fig_single, use_container_width=True)
+        if composant_selectionne == "Toutes les composantes":
+            df_filtre = df_melted
+            titre_f = "Toutes les fréquences cibles"
         else:
-            st.info("Aucune donnée disponible pour l'analyse ciblée.")
+            df_filtre = df_melted[df_melted["Composante / Fréquence Cible"] == composant_selectionne]
+            df_filtre = df_filtre.sort_values(by="Amplitude Spectrale (V)", ascending=ascending_flag)
+            titre_f = f"Zoom sur : {composant_selectionne}"
+
+        fig_single = px.bar(
+            df_filtre,
+            x="Système / Machine",
+            y="Amplitude Spectrale (V)",
+            color="Composante / Fréquence Cible" if composant_selectionne == "Toutes les composantes" else None,
+            title=titre_f,
+            text_auto=".4f" if composant_selectionne != "Toutes les composantes" else False,
+            barmode="group",
+        )
+        st.plotly_chart(fig_single, use_container_width=True)
 
 else:
     st.info("👈 Veuillez importer votre fichier Excel dans la barre latérale pour lancer l'analyse avancée.")
+    
