@@ -695,10 +695,29 @@ if uploaded_file is not None:
     # pour tenter des corrélations avec les indicateurs calculés.
     # -------------------------------------------------------------------
     if fichier_defectivite is not None:
-        try:
-            df_defect_importe = pd.read_csv(fichier_defectivite)
-        except Exception as exc:
-            st.sidebar.warning(f"Journal de défectivité illisible : {exc}")
+        df_defect_importe = None
+        derniere_erreur = None
+        # Essai 1 : format standard (séparateur virgule, décimale point)
+        # Essai 2 : format Excel français (séparateur point-virgule, décimale virgule)
+        for kwargs_lecture in (
+            {"sep": ",", "decimal": "."},
+            {"sep": ";", "decimal": ","},
+        ):
+            try:
+                fichier_defectivite.seek(0)
+                candidat = pd.read_csv(fichier_defectivite, **kwargs_lecture)
+                if "Niveau de défectivité" in candidat.columns and "Système / Machine" in candidat.columns:
+                    df_defect_importe = candidat
+                    break
+            except Exception as exc:
+                derniere_erreur = exc
+
+        if df_defect_importe is None:
+            st.sidebar.warning(
+                "Journal de défectivité illisible : vérifie que les colonnes "
+                "s'appellent exactement 'Système / Machine' et 'Niveau de "
+                f"défectivité'. Erreur technique : {derniere_erreur}"
+            )
             df_defect_importe = pd.DataFrame(columns=["Système / Machine", "Niveau de défectivité"])
     else:
         df_defect_importe = pd.DataFrame(columns=["Système / Machine", "Niveau de défectivité"])
@@ -767,7 +786,13 @@ if uploaded_file is not None:
             "la chaîne d'acquisition, à ne comparer qu'entre mesures faites avec "
             "exactement le même matériel."
         )
-    st.dataframe(df_res, use_container_width=True)
+    st.dataframe(
+        df_res,
+        use_container_width=True,
+        column_config={
+            "Niveau de défectivité": st.column_config.NumberColumn(format="%.7f"),
+        },
+    )
     st.caption(
         "'Distorsion Spectrale' et 'Ratio Pic/Bruit' sont des indicateurs "
         "indicatifs maison (voir info-bulle du code), pas les définitions "
