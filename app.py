@@ -24,6 +24,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 from scipy.fft import rfft, rfftfreq
+from scipy.signal import find_peaks
 from scipy.stats import kurtosis, skew
 
 # Importation optionnelle de ReportLab pour les PDF professionnels
@@ -41,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# LOGIQUE MÉTIER : FFT, normalisation DC, statistiques électriques
+# LOGIQUE MÉTIER : FFT, normalisation DC, statistiques & détection de pics
 # =============================================================================
 
 
@@ -138,27 +139,43 @@ def amplitude_relative_pct(amplitude: float, resultat: ResultatFFT) -> float:
     return float(amplitude / abs(resultat.dc) * 100.0)
 
 
+def detecter_pics_spectraux(
+    resultat: ResultatFFT, hauteur_min_pct: float = 5.0, distance_min_pts: int = 5
+) -> list[dict]:
+    """
+    Détecte automatiquement les pics significatifs dans le spectre d'amplitude.
+    """
+    freqs = resultat.freq
+    amps = resultat.amplitude
+
+    if len(amps) == 0:
+        return []
+
+    max_amp = np.max(amps)
+    if max_amp < 1e-9:
+        return []
+
+    seuil_absolu = max_amp * (hauteur_min_pct / 100.0)
+    indices_pics, _ = find_peaks(amps, height=seuil_absolu, distance=distance_min_pts)
+
+    pics_detectes = []
+    for idx in indices_pics:
+        f = freqs[idx]
+        a = amps[idx]
+        a_pct = amplitude_relative_pct(a, resultat)
+        pics_detectes.append({
+            "frequence": float(f),
+            "amplitude_v": float(a),
+            "amplitude_pct": float(a_pct),
+            "nom": f"Pic auto : {f:.2f} Hz ({a_pct:.2f}% DC)"
+        })
+
+    pics_detectes = sorted(pics_detectes, key=lambda x: x["amplitude_v"], reverse=True)
+    return pics_detectes
+
+
 def calculer_metriques_avancees(signal: np.ndarray, resultat_fft: ResultatFFT) -> dict[str, float]:
-    """
-    Calcule les indicateurs statistiques et électriques globaux du signal.
-
-    ATTENTION - "Distorsion Spectrale" et "Ratio Pic/Bruit" :
-    Ces deux indicateurs sont calculés de façon simplifiée à partir du
-    spectre complet (pic maximum vs médiane / reste de l'énergie), PAS selon
-    les définitions normées habituelles (le THD au sens IEC 61000 se calcule
-    à partir de l'énergie des harmoniques de la fondamentale uniquement, et
-    le SNR nécessite une séparation signal/bruit fiable). Ils sont donc
-    explicitement suffixés "(indicatif)" et ne doivent pas être comparés à
-    des seuils issus de fiches techniques utilisant les vraies définitions.
-
-    Kurtosis et Skewness sont des moments statistiques centrés (invariants à
-    l'offset DC par construction), donc valides même calculés sur le signal
-    brut. Le Kurtosis est un indicateur reconnu en analyse vibratoire pour
-    détecter des chocs/impacts (défauts de roulement typiquement) — sa
-    valeur de référence usuelle (~3 pour un signal proche gaussien) reste
-    indicative ici puisque le signal est une tension moteur, pas une
-    vibration mécanique directe.
-    """
+    """Calcule les indicateurs statistiques et électriques globaux du signal."""
     x = np.asarray(signal, dtype=float)
     x = x[~np.isnan(x)]
     n = len(x)
@@ -359,8 +376,7 @@ def generer_pdf_rapport_complet(
     elements.append(Paragraph(
         "⚠ Signal source : tension moteur DC (pas un capteur de vibration calibré). "
         "Les indicateurs 'Distorsion Spectrale' et 'Ratio Pic/Bruit' sont des indicateurs "
-        "indicatifs maison, PAS les définitions normées (THD IEC 61000, SNR classique). "
-        "La 'Somme des amplitudes' n'est pas un indicateur de santé mécanique global.",
+        "indicatifs maison, PAS les définitions normées (THD IEC 61000, SNR classique).",
         caveat_style,
     ))
 
@@ -504,9 +520,7 @@ def generer_html_rapport_complet(
         <h1>Rapport Global de Diagnostic Électromécanique</h1>
         <div class="caveat">
             ⚠ Signal source : tension moteur DC (pas un capteur de vibration calibré).
-            "Distorsion Spectrale" et "Ratio Pic/Bruit" sont des indicateurs indicatifs
-            maison, pas les définitions normées (THD IEC 61000, SNR classique).
-            La "Somme des amplitudes" n'est pas un indicateur de santé mécanique global.
+            "Distorsion Spectrale" et "Ratio Pic/Bruit" sont des indicateurs indicatifs maison.
         </div>
         <div class="summary">
             <h2>Vue d'Ensemble du Parc</h2>
@@ -553,7 +567,7 @@ def generer_html_rapport_complet(
 # INTERFACE STREAMLIT
 # =============================================================================
 
-FREQS_CIBLES = {
+FREQS_CIBLES_EMPIRIQUES = {
     "Rotation 1 tr/min (0.0167 Hz)": 0.016759,
     "1er étage réducteur (3.68 Hz)": 3.68,
     "Dernier étage réducteur (12.33 Hz)": 12.33,
@@ -586,12 +600,6 @@ unite_temps = (
 
 st.sidebar.markdown("---")
 st.sidebar.header("📐 Normalisation")
-st.sidebar.caption(
-    "Le signal est une tension moteur DC : l'amplitude brute en Volts dépend "
-    "du gain de la chaîne d'acquisition. La normalisation par la composante "
-    "continue (DC) donne un taux de modulation indépendant de ce gain — "
-    "recommandé pour comparer plusieurs machines entre elles."
-)
 normaliser_dc = st.sidebar.checkbox("Normaliser par la composante DC (% de modulation)", value=True)
 unite_amplitude = "% DC" if normaliser_dc else "V"
 
@@ -601,28 +609,19 @@ afficher_moyenne = st.sidebar.checkbox("Afficher la Ligne de Moyenne du lot", va
 afficher_seuil = st.sidebar.checkbox(
     "Afficher les Machines Atypiques du Lot (Moyenne + 1σ)",
     value=True,
-    help="Ce repère est calculé sur les machines du fichier importé, pas sur une "
-    "baseline saine de référence : il signale une dispersion relative au sein "
-    "du lot, pas un seuil de maintenance absolu.",
 )
 
 uploaded_file = st.sidebar.file_uploader("Importer le fichier Excel (.xlsx)", type=["xlsx", "xls"])
 
 st.sidebar.markdown("---")
 st.sidebar.header("🔗 Journal de Défectivité (optionnel)")
-st.sidebar.caption(
-    "Constats terrain (défauts observés hors de cette application), pour "
-    "tenter des corrélations avec les indicateurs calculés. Renseigne un "
-    "niveau par système dans le tableau principal, puis exporte le journal "
-    "pour le réimporter la prochaine fois."
-)
 fichier_defectivite = st.sidebar.file_uploader(
     "Importer un journal existant (CSV)", type=["csv"], key="import_defectivite"
 )
 
 
 @st.cache_data(show_spinner=False)
-def _analyser_fichier(file_bytes: bytes, mode_value: str, unite_value: str):
+def _analyser_fichier(file_bytes: bytes, mode_value: str, unite_value: str, freqs_cibles: dict[str, float]):
     mode = ModeFFT(mode_value)
     unite = UniteTemps(unite_value)
 
@@ -635,7 +634,7 @@ def _analyser_fichier(file_bytes: bytes, mode_value: str, unite_value: str):
             df = lire_onglet(xls, nom_onglet)
             res = analyser_systeme(
                 df=df, col_temps=df.columns[0], col_signal=df.columns[1],
-                mode=mode, freqs_cibles=FREQS_CIBLES, unite_temps=unite,
+                mode=mode, freqs_cibles=freqs_cibles, unite_temps=unite,
             )
             resultats.append({"nom": nom_onglet, **res})
         except Exception as exc:
@@ -645,8 +644,50 @@ def _analyser_fichier(file_bytes: bytes, mode_value: str, unite_value: str):
 
 
 if uploaded_file is not None:
+    # -------------------------------------------------------------------
+    # DÉTECTION AUTOMATIQUE DES PICS SPECTRAUX (Dynamique)
+    # -------------------------------------------------------------------
+    st.sidebar.markdown("---")
+    st.sidebar.header("🔍 Détection Automatique de Pics")
+    activer_detection_auto = st.sidebar.checkbox("Activer la recherche de pics automatiques", value=True)
+    
+    seuil_sensibilite = st.sidebar.slider(
+        "Seuil minimal du pic (% du max)", 
+        min_value=1.0, max_value=30.0, value=5.0, step=1.0,
+        help="Un pic doit dépasser ce pourcentage de l'amplitude maximale du spectre pour être détecté."
+    )
+
+    # Copie des fréquences empiriques de base
+    freqs_cibles_dyn = FREQS_CIBLES_EMPIRIQUES.copy()
+
+    if activer_detection_auto:
+        try:
+            # Analyse préliminaire du premier onglet pour extraire les pics spectraux de référence
+            file_bytes_cache = uploaded_file.getvalue()
+            xls_temp = pd.ExcelFile(io.BytesIO(file_bytes_cache))
+            df_ref = lire_onglet(xls_temp, xls_temp.sheet_names[0])
+            dt_ref = detecter_dt(df_ref.iloc[:, 0].values, unite=unite_temps)
+            signal_ref = df_ref.iloc[:, 1].values
+            fft_ref = calculer_fft(signal_ref, dt=dt_ref, mode=mode_calcul)
+            
+            pics_auto = detecter_pics_spectraux(fft_ref, hauteur_min_pct=seuil_sensibilite)
+            noms_pics_auto = [p["nom"] for p in pics_auto]
+            
+            pics_selectionnes = st.sidebar.multiselect(
+                "Sélectionner les pics auto à inclure dans l'analyse :",
+                options=noms_pics_auto,
+                default=noms_pics_auto[:3] if len(noms_pics_auto) >= 3 else noms_pics_auto
+            )
+            
+            for p in pics_auto:
+                if p["nom"] in pics_selectionnes:
+                    freqs_cibles_dyn[p["nom"]] = p["frequence"]
+        except Exception as e:
+            st.sidebar.warning(fImpossible de lancer la détection auto des pics : {e})
+
+    # Lancement de l'analyse globale avec les fréquences cibles dynamiques (empiriques + auto sélectionnées)
     resultats, erreurs = _analyser_fichier(
-        uploaded_file.getvalue(), mode_calcul.value, unite_temps.value
+        uploaded_file.getvalue(), mode_calcul.value, unite_temps.value, freqs_cibles_dyn
     )
 
     if erreurs:
@@ -691,12 +732,10 @@ if uploaded_file is not None:
     df_res = pd.DataFrame(lignes)
 
     # -------------------------------------------------------------------
-    # JOURNAL DE DÉFECTIVITÉ : géré via TextColumn pour permettre 
-    # la saisie et l'édition libre de valeurs décimales précises.
+    # JOURNAL DE DÉFECTIVITÉ : géré via TextColumn (contournement Streamlit)
     # -------------------------------------------------------------------
     if fichier_defectivite is not None:
         df_defect_importe = None
-        derniere_erreur = None
         for kwargs_lecture in (
             {"sep": ",", "decimal": "."},
             {"sep": ";", "decimal": ","},
@@ -707,8 +746,8 @@ if uploaded_file is not None:
                 if "Niveau de défectivité" in candidat.columns and "Système / Machine" in candidat.columns:
                     df_defect_importe = candidat
                     break
-            except Exception as exc:
-                derniere_erreur = exc
+            except Exception:
+                pass
 
         if df_defect_importe is None:
             df_defect_importe = pd.DataFrame(columns=["Système / Machine", "Niveau de défectivité"])
@@ -721,12 +760,10 @@ if uploaded_file is not None:
     if "Niveau de défectivité" not in df_defect_base.columns:
         df_defect_base["Niveau de défectivité"] = 0.0
     
-    # Nettoyage et conversion initiale en float
     df_defect_base["Niveau de défectivité"] = pd.to_numeric(
         df_defect_base["Niveau de défectivité"], errors="coerce"
     ).astype(float).fillna(0.0)
 
-    # Conversion temporaire en texte formaté pour contourner le blocage entier de l'éditeur Streamlit
     df_defect_base["Niveau de défectivité"] = df_defect_base["Niveau de défectivité"].apply(lambda x: f"{x:.6f}")
 
     st.markdown("---")
@@ -747,13 +784,11 @@ if uploaded_file is not None:
         key="editeur_defectivite",
     )
     
-    # RE-CONVERSION EN NUMÉRIQUE (FLOAT) APRÈS MODIFICATION PAR L'UTILISATEUR
     df_defect_edite["Niveau de défectivité"] = pd.to_numeric(
         df_defect_edite["Niveau de défectivité"].str.replace(",", "."), 
         errors="coerce"
     ).astype(float).fillna(0.0)
 
-    # Suppression de l'ancienne colonne si elle existait déjà pour éviter les doublons
     if "Niveau de défectivité" in df_res.columns:
         df_res = df_res.drop(columns=["Niveau de défectivité"])
 
@@ -764,24 +799,13 @@ if uploaded_file is not None:
 
     csv_defect_bytes = df_defect_edite.to_csv(index=False).encode("utf-8")
     st.download_button(
-        "💾 Télécharger le journal de défectivité (CSV) — à réimporter la prochaine fois",
+        "💾 Télécharger le journal de défectivité (CSV)",
         data=csv_defect_bytes,
         file_name="journal_defectivite.csv",
         mime="text/csv",
     )
 
     st.subheader("📋 Tableau Synthétique - Indicateurs Électromécaniques")
-    if normaliser_dc:
-        st.caption(
-            "Amplitudes par composante exprimées en % de la composante DC (taux "
-            "de modulation), comparables entre machines même avec des chaînes "
-            "d'acquisition différentes."
-        )
-    else:
-        st.caption(
-            "⚠️ Amplitudes par composante en Volts bruts : dépendent du gain de "
-            "la chaîne d'acquisition."
-        )
     st.dataframe(
         df_res,
         use_container_width=True,
@@ -796,7 +820,7 @@ if uploaded_file is not None:
         "Somme des amplitudes (indicatif)", "RMS Total (V)", "Offset DC (V)",
     ]
     metriques_existantes = [m for m in metriques_disponibles if m in df_res.columns]
-    cols_cibles = [col for col in FREQS_CIBLES.keys() if col in df_res.columns]
+    cols_cibles = [col for col in freqs_cibles_dyn.keys() if col in df_res.columns]
 
     if cols_cibles:
         df_melted = pd.melt(
@@ -821,7 +845,6 @@ if uploaded_file is not None:
             "Indicateur principal à analyser / classer :",
             options=metriques_existantes if metriques_existantes else ["Système / Machine"],
             index=0,
-            help="Sélectionnez un indicateur pour identifier les machines atypiques du lot.",
         )
     with col_droite:
         sens_tri = st.radio("Ordre de classement :", ["Du plus faible au plus fort", "Du plus fort au plus faible"], horizontal=True)
@@ -867,7 +890,6 @@ if uploaded_file is not None:
 
     with tab2:
         st.markdown("#### Amplitudes spectrales par machine (Empilées)")
-        st.caption("Empilement à but de lecture visuelle : la hauteur cumulée n'est pas un indicateur de sévérité globale.")
         if not df_melted.empty:
             fig_stacked = px.bar(
                 df_melted, x="Système / Machine", y=f"Amplitude ({unite_amplitude})",
@@ -914,16 +936,10 @@ if uploaded_file is not None:
 
     with tab4:
         st.markdown("#### Corrélation entre les indicateurs calculés et tes constats de défectivité")
-        st.caption(
-            "Objectif : repérer quel(s) indicateur(s) varient le plus avec le "
-            "niveau de défaut que tu mesures sur le terrain."
-        )
-
         if df_res["Niveau de défectivité"].nunique() <= 1:
             st.info(
                 "Renseigne des niveaux de défectivité différents d'au moins deux "
-                "systèmes dans le journal ci-dessus pour activer l'analyse de "
-                "corrélation."
+                "systèmes dans le journal ci-dessus pour activer l'analyse de corrélation."
             )
         else:
             colonnes_indicateurs = [
@@ -940,7 +956,6 @@ if uploaded_file is not None:
             )
 
             if "Niveau de défectivité" not in matrice_pearson.columns:
-                st.warning("Impossible de calculer la corrélation : la colonne 'Niveau de défectivité' n'est pas numérique.")
                 correlations = pd.Series(dtype=float)
             else:
                 pearson_s = matrice_pearson["Niveau de défectivité"].drop("Niveau de défectivité")
@@ -961,7 +976,7 @@ if uploaded_file is not None:
                 fig_corr = px.bar(
                     df_corr_melted, x="Coefficient de corrélation", y="Indicateur",
                     color="Méthode", barmode="group",
-                    orientation="h", title="Indicateurs classés par force de corrélation (tri sur Pearson)",
+                    orientation="h", title="Indicateurs classés par force de corrélation",
                     range_x=[-1, 1],
                 )
                 fig_corr.update_layout(yaxis={"categoryorder": "array", "categoryarray": correlations.index[::-1].tolist()})
@@ -1016,7 +1031,6 @@ if uploaded_file is not None:
                 data=html_content.encode("utf-8"),
                 file_name="rapport_global_diagnostic_parc.html", mime="text/html",
                 use_container_width=True,
-                help="Ouvrez ce fichier dans votre navigateur puis Ctrl+P -> Enregistrer au format PDF.",
             )
 
 else:
