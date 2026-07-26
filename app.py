@@ -2,7 +2,7 @@
 app.py
 ------
 Analyseur Électrique DC & Diagnostique Vibratoire - Application Streamlit (fichier unique).
-Intégration d'indicateurs avancés, Export CSV et Rapport d'analyse.
+Intégration d'indicateurs avancés, Export CSV et Rapport Global & Détaillé complet.
 """
 
 from __future__ import annotations
@@ -19,12 +19,12 @@ import streamlit as st
 from scipy.fft import rfft, rfftfreq
 from scipy.stats import kurtosis, skew
 
-# Importation optionnelle de ReportLab pour les PDF
+# Importation optionnelle de ReportLab pour les PDF professionnels
 try:
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle, PageBreak
     HAS_REPORTLAB = True
 except ImportError:
     HAS_REPORTLAB = False
@@ -266,8 +266,8 @@ def lire_onglet(xls: pd.ExcelFile, nom_onglet: str) -> pd.DataFrame:
     return df
 
 
-def generer_pdf_rapport(df_res: pd.DataFrame, metrique_maitresse: str) -> bytes:
-    """Génère un rapport PDF synthétique du parc machine."""
+def generer_pdf_rapport_complet(df_res: pd.DataFrame, resultats_bruts: list[dict], metrique_maitresse: str) -> bytes:
+    """Génère un rapport PDF global et détaillé pour tout le parc (synthèse + fiches machines)."""
     if not HAS_REPORTLAB:
         raise RuntimeError("ReportLab non disponible.")
     
@@ -295,7 +295,7 @@ def generer_pdf_rapport(df_res: pd.DataFrame, metrique_maitresse: str) -> bytes:
     heading_style = ParagraphStyle(
         'HeadingStyle',
         parent=styles['Heading2'],
-        fontSize=14,
+        fontSize=13,
         textColor=colors.HexColor("#1E3A8A"),
         spaceBefore=12,
         spaceAfter=8
@@ -303,15 +303,16 @@ def generer_pdf_rapport(df_res: pd.DataFrame, metrique_maitresse: str) -> bytes:
     body_style = ParagraphStyle(
         'BodyStyle',
         parent=styles['Normal'],
-        fontSize=10,
+        fontSize=9,
         textColor=colors.HexColor("#1F2937"),
-        spaceAfter=6
+        spaceAfter=5
     )
 
-    elements.append(Paragraph("Rapport de Diagnostic Électromécanique & Vibratoire", title_style))
-    elements.append(Paragraph("Analyse automatisée du parc - Indicateurs Avancés & Spectres FFT", subtitle_style))
+    # PAGE 1 : SYNTHÈSE GLOBALE DU PARC
+    elements.append(Paragraph("Rapport Global de Diagnostic Électromécanique & Vibratoire", title_style))
+    elements.append(Paragraph("Synthèse multicritère de l'ensemble du parc machine", subtitle_style))
 
-    elements.append(Paragraph("Synthèse Globale", heading_style))
+    elements.append(Paragraph("1. Vue d'ensemble du parc", heading_style))
     n_machines = len(df_res)
     elements.append(Paragraph(f"Nombre total de systèmes / machines analysés : <b>{n_machines}</b>", body_style))
     elements.append(Paragraph(f"Indicateur maître de classement : <b>{metrique_maitresse}</b>", body_style))
@@ -321,10 +322,10 @@ def generer_pdf_rapport(df_res: pd.DataFrame, metrique_maitresse: str) -> bytes:
         val_max = df_res[metrique_maitresse].max()
         machine_max = df_res.loc[df_res[metrique_maitresse].idxmax(), "Système / Machine"] if n_machines > 0 else "N/A"
         elements.append(Paragraph(f"• Moyenne du parc pour {metrique_maitresse} : <b>{val_moy:.4f}</b>", body_style))
-        elements.append(Paragraph(f"• Valeur maximale : <b>{val_max:.4f}</b> (Machine : <b>{machine_max}</b>)", body_style))
+        elements.append(Paragraph(f"• Valeur maximale : <b>{val_max:.4f}</b> (Machine critique : <b>{machine_max}</b>)", body_style))
 
-    elements.append(Spacer(1, 15))
-    elements.append(Paragraph("Tableau Récapitulatif des Indicateurs Clés", heading_style))
+    elements.append(Spacer(1, 10))
+    elements.append(Paragraph("2. Tableau Récapitulatif Global", heading_style))
 
     cols_a_afficher = ["Système / Machine", "Offset DC (V)", "RMS Total (V)", "Crest Factor", "Kurtosis", "THD (%)"]
     cols_pdf = [c for c in cols_a_afficher if c in df_res.columns]
@@ -339,52 +340,137 @@ def generer_pdf_rapport(df_res: pd.DataFrame, metrique_maitresse: str) -> bytes:
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
         ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 9),
-        ('BOTTOMPADDING', (0, 0), (-1, 0), 6),
+        ('FONTSIZE', (0, 0), (-1, 0), 8),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 5),
         ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor("#F3F4F6")),
         ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#D1D5DB")),
-        ('FONTSIZE', (0, 1), (-1, -1), 8),
-        ('TOPPADDING', (0, 1), (-1, -1), 4),
-        ('BOTTOMPADDING', (0, 1), (-1, -1), 4),
+        ('FONTSIZE', (0, 1), (-1, -1), 7.5),
+        ('TOPPADDING', (0, 1), (-1, -1), 3),
+        ('BOTTOMPADDING', (0, 1), (-1, -1), 3),
     ]))
-
     elements.append(t)
+
+    # FICHES DÉTAILLÉES PAR MACHINE / ONGLET
+    for r in resultats_bruts:
+        elements.append(PageBreak())
+        nom_machine = r.get("nom", "Inconnu")
+        elements.append(Paragraph(f"Fiche Détaillée Machine : {nom_machine}", title_style))
+        elements.append(Paragraph("Paramètres physiques, électriques et spectrales extraits", subtitle_style))
+
+        elements.append(Paragraph("Indicateurs Électriques & Statistiques", heading_style))
+        fiche_metriques = [
+            ["Indicateur", "Valeur"],
+            ["Offset DC (V)", f"{r.get('Offset DC (V)', 0):.4f}"],
+            ["RMS Total (V)", f"{r.get('RMS Total (V)', 0):.4f}"],
+            ["RMS AC (V)", f"{r.get('RMS AC (V)', 0):.4f}"],
+            ["Peak (V)", f"{r.get('Peak (V)', 0):.4f}"],
+            ["Peak-to-Peak (V)", f"{r.get('Peak-to-Peak (V)', 0):.4f}"],
+            ["Facteur de Crête (Crest Factor)", f"{r.get('Crest Factor', 0):.3f}"],
+            ["Kurtosis", f"{r.get('Kurtosis', 0):.3f}"],
+            ["Skewness", f"{r.get('Skewness', 0):.3f}"],
+            ["THD (%)", f"{r.get('THD (%)', 0):.2f}%"],
+            ["SNR (dB)", f"{r.get('SNR (dB)', 0):.2f} dB"],
+        ]
+        t_met = Table(fiche_metriques, repeatRows=1)
+        t_met.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#4B5563")),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 8),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor("#F9FAFB")),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#E5E7EB")),
+            ('FONTSIZE', (0, 1), (-1, -1), 8),
+            ('TOPPADDING', (0, 1), (-1, -1), 3),
+            ('BOTTOMPADDING', (0, 1), (-1, -1), 3),
+        ]))
+        elements.append(t_met)
+
+        elements.append(Spacer(1, 10))
+        elements.append(Paragraph("Amplitudes Spectrales par Composante Cible", heading_style))
+        cibles_data = [["Composante / Fréquence Cible", "Amplitude (V)"]]
+        for comp, val in r.get("cibles", {}).items():
+            cibles_data.append([comp, f"{val:.5f} V"])
+
+        t_cib = Table(cibles_data, repeatRows=1)
+        t_cib.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 8),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor("#F9FAFB")),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#E5E7EB")),
+            ('FONTSIZE', (0, 1), (-1, -1), 8),
+            ('TOPPADDING', (0, 1), (-1, -1), 3),
+            ('BOTTOMPADDING', (0, 1), (-1, -1), 3),
+        ]))
+        elements.append(t_cib)
+
     doc.build(elements)
     buffer.seek(0)
     return buffer.getvalue()
 
 
-def generer_html_rapport(df_res: pd.DataFrame, metrique_maitresse: str) -> str:
-    """Génère un rapport HTML stylisé imprimable en PDF par le navigateur."""
+def generer_html_rapport_complet(df_res: pd.DataFrame, resultats_bruts: list[dict], metrique_maitresse: str) -> str:
+    """Génère un rapport HTML complet multi-machines imprimable en PDF."""
     html = f"""
     <!DOCTYPE html>
     <html>
     <head>
         <meta charset="utf-8">
-        <title>Rapport de Diagnostic Électromécanique</title>
+        <title>Rapport Global de Diagnostic</title>
         <style>
             body {{ font-family: Arial, sans-serif; margin: 30px; color: #1F2937; }}
             h1 {{ color: #1E3A8A; text-align: center; }}
-            h2 {{ color: #1E3A8A; border-bottom: 2px solid #1E3A8A; padding-bottom: 5px; }}
-            table {{ width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 12px; }}
-            th, td {{ border: 1px solid #D1D5DB; padding: 8px; text-align: center; }}
+            h2 {{ color: #1E3A8A; border-bottom: 2px solid #1E3A8A; padding-bottom: 5px; margin-top: 30px; }}
+            table {{ width: 100%; border-collapse: collapse; margin-top: 10px; margin-bottom: 20px; font-size: 11px; }}
+            th, td {{ border: 1px solid #D1D5DB; padding: 6px; text-align: center; }}
             th {{ background-color: #1E3A8A; color: white; }}
             tr:nth-child(even) {{ background-color: #F3F4F6; }}
             .summary {{ background: #EFF6FF; padding: 15px; border-radius: 5px; margin-bottom: 20px; }}
+            .page-break {{ page-break-before: always; }}
         </style>
     </head>
     <body>
-        <h1>Rapport de Diagnostic Électromécanique & Vibratoire</h1>
+        <h1>Rapport Global de Diagnostic Électromécanique & Vibratoire</h1>
         <div class="summary">
-            <h2>Synthèse Globale</h2>
-            <p>Nombre de systèmes analysés : <b>{len(df_res)}</b></p>
+            <h2>Vue d'Ensemble du Parc</h2>
+            <p>Nombre total de systèmes analysés : <b>{len(df_res)}</b></p>
             <p>Indicateur maître : <b>{metrique_maitresse}</b></p>
         </div>
-        <h2>Tableau Récapitulatif</h2>
+        <h2>Tableau Récapitulatif Global</h2>
         {df_res.to_html(index=False, classes='table')}
-    </body>
-    </html>
     """
+
+    for r in resultats_bruts:
+        nom_machine = r.get("nom", "Inconnu")
+        html += f"""
+        <div class="page-break"></div>
+        <h1>Fiche Détaillée Machine : {nom_machine}</h1>
+        <h2>Indicateurs Électriques & Statistiques</h2>
+        <table>
+            <tr><th>Indicateur</th><th>Valeur</th></tr>
+            <tr><td>Offset DC (V)</td><td>{r.get('Offset DC (V)', 0):.4f}</td></tr>
+            <tr><td>RMS Total (V)</td><td>{r.get('RMS Total (V)', 0):.4f}</td></tr>
+            <tr><td>RMS AC (V)</td><td>{r.get('RMS AC (V)', 0):.4f}</td></tr>
+            <tr><td>Peak (V)</td><td>{r.get('Peak (V)', 0):.4f}</td></tr>
+            <tr><td>Peak-to-Peak (V)</td><td>{r.get('Peak-to-Peak (V)', 0):.4f}</td></tr>
+            <tr><td>Facteur de Crête</td><td>{r.get('Crest Factor', 0):.3f}</td></tr>
+            <tr><td>Kurtosis</td><td>{r.get('Kurtosis', 0):.3f}</td></tr>
+            <tr><td>Skewness</td><td>{r.get('Skewness', 0):.3f}</td></tr>
+            <tr><td>THD (%)</td><td>{r.get('THD (%)', 0):.2f}%</td></tr>
+            <tr><td>SNR (dB)</td><td>{r.get('SNR (dB)', 0):.2f} dB</td></tr>
+        </table>
+        <h2>Amplitudes Spectrales par Composante</h2>
+        <table>
+            <tr><th>Composante / Fréquence Cible</th><th>Amplitude (V)</th></tr>
+        """
+        for comp, val in r.get("cibles", {}).items():
+            html += f"<tr><td>{comp}</td><td>{val:.5f} V</td></tr>"
+        html += "</table>"
+
+    html += "</body></html>"
     return html
 
 
@@ -629,10 +715,10 @@ if uploaded_file is not None:
             st.info("Aucune donnée disponible pour l'analyse ciblée.")
 
     # =========================================================================
-    # EXPORTS : CSV & RAPPORT
+    # EXPORTS : CSV & RAPPORT GLOBAL & DÉTAILLÉ
     # =========================================================================
     st.markdown("---")
-    st.subheader("📥 Exportation des Résultats & Rapports")
+    st.subheader("📥 Exportation des Résultats & Rapports Complets")
 
     col_exp1, col_exp2 = st.columns(2)
 
@@ -649,26 +735,25 @@ if uploaded_file is not None:
     with col_exp2:
         if HAS_REPORTLAB:
             try:
-                pdf_bytes = generer_pdf_rapport(df_res, metrique_maitresse)
+                pdf_bytes = generer_pdf_rapport_complet(df_res, resultats, metrique_maitresse)
                 st.download_button(
-                    label="📄 Télécharger le Rapport d'Analyse (PDF)",
+                    label="📄 Télécharger le Rapport Global Complet (PDF)",
                     data=pdf_bytes,
-                    file_name="rapport_diagnostic_parc.pdf",
+                    file_name="rapport_global_diagnostic_parc.pdf",
                     mime="application/pdf",
                     use_container_width=True,
                 )
             except Exception as e:
                 st.warning(f"Erreur de génération PDF : {e}")
         else:
-            # Fallback rapport HTML (imprimable en PDF directement via le navigateur)
-            html_content = generer_html_rapport(df_res, metrique_maitresse)
+            html_content = generer_html_rapport_complet(df_res, resultats, metrique_maitresse)
             st.download_button(
-                label="📄 Télécharger le Rapport d'Analyse (HTML / Imprimable PDF)",
+                label="📄 Télécharger le Rapport Global Complet (HTML / Imprimable PDF)",
                 data=html_content.encode("utf-8"),
-                file_name="rapport_diagnostic_parc.html",
+                file_name="rapport_global_diagnostic_parc.html",
                 mime="text/html",
                 use_container_width=True,
-                help="Ouvrez ce fichier dans votre navigateur puis faites Ctrl+P -> Enregistrer au format PDF.",
+                help="Ouvrez ce fichier dans votre navigateur puis faites Ctrl+P -> Enregistrer au format PDF pour obtenir le rapport complet de tout le parc.",
             )
 
 else:
