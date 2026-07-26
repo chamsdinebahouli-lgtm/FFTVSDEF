@@ -632,6 +632,19 @@ normaliser_dc = st.sidebar.checkbox("Normaliser par la composante DC (% de modul
 unite_amplitude = "% DC" if normaliser_dc else "V"
 
 st.sidebar.markdown("---")
+st.sidebar.header("➕ Composants de la Somme")
+st.sidebar.caption(
+    "Choisis quelles fréquences cibles entrent dans la 'Somme des amplitudes "
+    "(indicatif)'. Les 4 ci-dessous restent suivies individuellement dans le "
+    "tableau et les graphiques quoi qu'il arrive — ceci ne change que le "
+    "calcul de la somme."
+)
+composants_inclus_somme = [
+    nom_composant for nom_composant in FREQS_CIBLES
+    if st.sidebar.checkbox(nom_composant, value=True, key=f"inclure_{nom_composant}")
+]
+
+st.sidebar.markdown("---")
 st.sidebar.header("📊 Indicateurs Statistiques")
 afficher_moyenne = st.sidebar.checkbox("Afficher la Ligne de Moyenne du lot", value=True)
 afficher_seuil = st.sidebar.checkbox(
@@ -704,6 +717,11 @@ if uploaded_file is not None:
 
     lignes = []
     for r in resultats:
+        amplitudes_cibles = r.get(cle_cibles, {})
+        somme_selective = sum(
+            val for comp, val in amplitudes_cibles.items() if comp in composants_inclus_somme
+        )
+
         ligne = {
             "Système / Machine": r.get("nom", "Inconnu"),
             "Offset DC (V)": round(r.get("Offset DC (V)", 0.0), 4),
@@ -716,9 +734,8 @@ if uploaded_file is not None:
             "Skewness": round(r.get("Skewness", 0.0), 3),
             "Distorsion Spectrale (%) - indicatif": round(r.get("Distorsion Spectrale (%) - indicatif", 0.0), 2),
             "Ratio Pic/Bruit (dB) - indicatif": round(r.get("Ratio Pic/Bruit (dB) - indicatif", 0.0), 2),
-            "Somme des amplitudes (indicatif)": round(r.get("Somme des amplitudes (indicatif)", 0.0), 4),
+            "Somme des amplitudes (indicatif)": round(somme_selective, 4),
         }
-        amplitudes_cibles = r.get(cle_cibles, {})
         for comp, val in amplitudes_cibles.items():
             ligne[comp] = round(val, 5)
 
@@ -813,6 +830,16 @@ if uploaded_file is not None:
         "visuellement les machines, ce n'est pas un indicateur de santé "
         "mécanique global — chaque composant doit être évalué individuellement."
     )
+    if composants_inclus_somme:
+        st.caption(
+            "📐 Composants actuellement inclus dans la Somme (réglable dans la "
+            f"barre latérale) : {', '.join(composants_inclus_somme)}."
+        )
+    else:
+        st.warning(
+            "Aucun composant sélectionné pour la Somme dans la barre latérale "
+            "— elle vaut donc 0 pour toutes les machines."
+        )
 
     metriques_disponibles = [
         "Kurtosis", "Crest Factor", "RMS AC (V)", "Peak-to-Peak (V)",
