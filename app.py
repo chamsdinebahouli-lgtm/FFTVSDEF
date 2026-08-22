@@ -765,6 +765,7 @@ if uploaded_file is not None:
         )
 
         ligne = {
+            "Exclure": False,
             "Système / Machine": r.get("nom", "Inconnu"),
             "Offset DC (V)": round(r.get("Offset DC (V)", 0.0), 4),
             "RMS Total (V)": round(r.get("RMS Total (V)", 0.0), 4),
@@ -836,13 +837,17 @@ if uploaded_file is not None:
         "deux fonctionnent. Le reste du tableau est calculé automatiquement "
         "et non modifiable."
     )
-    colonnes_non_editables = [c for c in df_res.columns if c != "Niveau de défectivité"]
+    colonnes_non_editables = [c for c in df_res.columns if c not in ("Niveau de défectivité", "Exclure")]
     df_res = st.data_editor(
         df_res,
         use_container_width=True,
         hide_index=True,
         disabled=colonnes_non_editables,
         column_config={
+            "Exclure": st.column_config.CheckboxColumn(
+                help="Coche pour exclure cette machine des graphiques, de la corrélation "
+                "et des exports. La ligne reste visible ici pour pouvoir la réactiver.",
+            ),
             "Niveau de défectivité": st.column_config.TextColumn(
                 help="Constat terrain, pas calculé par l'application. Point ou virgule acceptés.",
             ),
@@ -856,6 +861,30 @@ if uploaded_file is not None:
         df_res["Niveau de défectivité"].astype(str).str.strip().str.replace(",", ".", regex=False),
         errors="coerce",
     ).fillna(0.0)
+
+    # -------------------------------------------------------------------
+    # EXCLUSION : les machines cochées "Exclure" restent visibles dans le
+    # tableau (pour pouvoir les réactiver facilement) mais sont retirées de
+    # tous les graphiques, de la corrélation et des exports en aval. On
+    # continue de manipuler df_res tel quel pour le tableau et le journal de
+    # défectivité complet ; df_actif / resultats_actifs prennent le relais
+    # partout ailleurs.
+    # -------------------------------------------------------------------
+    df_actif = df_res[~df_res["Exclure"]].reset_index(drop=True)
+
+    if df_res["Exclure"].any():
+        noms_exclus = df_res.loc[df_res["Exclure"], "Système / Machine"].tolist()
+        st.caption(
+            f"🚫 {len(noms_exclus)} machine(s) exclue(s) de l'analyse (graphiques, "
+            f"corrélation, export) : {', '.join(noms_exclus)}. Décoche-les dans le "
+            "tableau pour les réintégrer."
+        )
+
+    if df_actif.empty:
+        st.warning("Toutes les machines sont exclues : décoche-en au moins une pour voir les graphiques.")
+        st.stop()
+
+    resultats_actifs = [r for r in resultats if r["nom"] in set(df_actif["Système / Machine"])]
 
     csv_defect_bytes = df_res[["Système / Machine", "Niveau de défectivité"]].to_csv(index=False).encode("utf-8")
     st.download_button(
@@ -888,16 +917,16 @@ if uploaded_file is not None:
         "Distorsion Spectrale (%) - indicatif", "Ratio Pic/Bruit (dB) - indicatif",
         "Somme des amplitudes (indicatif)", "RMS Total (V)", "Offset DC (V)",
     ]
-    metriques_existantes = [m for m in metriques_disponibles if m in df_res.columns]
-    cols_cibles = [col for col in FREQS_TOUTES.keys() if col in df_res.columns]
+    metriques_existantes = [m for m in metriques_disponibles if m in df_actif.columns]
+    cols_cibles = [col for col in FREQS_TOUTES.keys() if col in df_actif.columns]
 
     if cols_cibles:
         df_melted = pd.melt(
-            df_res, id_vars=["Système / Machine"], value_vars=cols_cibles,
+            df_actif, id_vars=["Système / Machine"], value_vars=cols_cibles,
             var_name="Composante / Fréquence Cible", value_name=f"Amplitude ({unite_amplitude})",
         )
         df_melted = df_melted.merge(
-            df_res[["Système / Machine"] + metriques_existantes], on="Système / Machine", how="left"
+            df_actif[["Système / Machine"] + metriques_existantes], on="Système / Machine", how="left"
         )
     else:
         df_melted = pd.DataFrame(
@@ -921,8 +950,8 @@ if uploaded_file is not None:
 
     ascending_flag = sens_tri.startswith("Du plus faible")
     ordre_systemes = (
-        df_res.sort_values(by=metrique_maitresse, ascending=ascending_flag)["Système / Machine"].tolist()
-        if metrique_maitresse in df_res.columns else []
+        df_actif.sort_values(by=metrique_maitresse, ascending=ascending_flag)["Système / Machine"].tolist()
+        if metrique_maitresse in df_actif.columns else []
     )
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
@@ -936,14 +965,14 @@ if uploaded_file is not None:
     with tab1:
         st.markdown(f"#### Classement du parc selon l'indicateur : **{metrique_maitresse}**")
         fig_global = px.bar(
-            df_res, x="Système / Machine", y=metrique_maitresse,
+            df_actif, x="Système / Machine", y=metrique_maitresse,
             title=f"Classement des machines par {metrique_maitresse}",
             text_auto=".2f", category_orders={"Système / Machine": ordre_systemes},
             color=metrique_maitresse, color_continuous_scale="Viridis",
         )
 
-        val_moy = df_res[metrique_maitresse].mean()
-        val_std = df_res[metrique_maitresse].std()
+        val_moy = df_actif[metrique_maitresse].mean()
+        val_std = df_actif[metrique_maitresse].std()
 
         if afficher_moyenne:
             fig_global.add_hline(
@@ -1020,7 +1049,7 @@ if uploaded_file is not None:
             "d'une dizaine de points)."
         )
 
-        if df_res["Niveau de défectivité"].nunique() <= 1:
+        if df_actif["Niveau de défectivité"].nunique() <= 1:
             st.info(
                 "Renseigne des niveaux de défectivité différents d'au moins deux "
                 "systèmes dans le journal ci-dessus pour activer l'analyse de "
@@ -1028,15 +1057,15 @@ if uploaded_file is not None:
             )
         else:
             colonnes_indicateurs = [
-                c for c in df_res.columns
-                if c not in ("Système / Machine", "Niveau de défectivité")
-                and pd.api.types.is_numeric_dtype(df_res[c])
+                c for c in df_actif.columns
+                if c not in ("Système / Machine", "Niveau de défectivité", "Exclure")
+                and pd.api.types.is_numeric_dtype(df_actif[c])
             ]
 
-            matrice_pearson = df_res[colonnes_indicateurs + ["Niveau de défectivité"]].corr(
+            matrice_pearson = df_actif[colonnes_indicateurs + ["Niveau de défectivité"]].corr(
                 method="pearson", numeric_only=True
             )
-            matrice_spearman = df_res[colonnes_indicateurs + ["Niveau de défectivité"]].corr(
+            matrice_spearman = df_actif[colonnes_indicateurs + ["Niveau de défectivité"]].corr(
                 method="spearman", numeric_only=True
             )
 
@@ -1082,14 +1111,14 @@ if uploaded_file is not None:
                 )
                 try:
                     fig_scatter = px.scatter(
-                        df_res, x="Niveau de défectivité", y=indicateur_focus,
+                        df_actif, x="Niveau de défectivité", y=indicateur_focus,
                         text="Système / Machine", title=f"{indicateur_focus} vs Niveau de défectivité",
                         trendline="ols",
                     )
                 except Exception:
                     # Repli si statsmodels n'est pas installé (trendline indisponible)
                     fig_scatter = px.scatter(
-                        df_res, x="Niveau de défectivité", y=indicateur_focus,
+                        df_actif, x="Niveau de défectivité", y=indicateur_focus,
                         text="Système / Machine", title=f"{indicateur_focus} vs Niveau de défectivité",
                     )
                 fig_scatter.update_traces(textposition="top center")
@@ -1109,9 +1138,9 @@ if uploaded_file is not None:
             "complet n'a de sens que pour une machine précise)."
         )
 
-        noms_systemes = [r["nom"] for r in resultats]
+        noms_systemes = [r["nom"] for r in resultats_actifs]
         systeme_focus = st.selectbox("Système à inspecter :", options=noms_systemes, key="select_pics_auto")
-        r_focus = next(r for r in resultats if r["nom"] == systeme_focus)
+        r_focus = next(r for r in resultats_actifs if r["nom"] == systeme_focus)
 
         if "spectre_freq" not in r_focus:
             st.warning(
@@ -1232,7 +1261,7 @@ if uploaded_file is not None:
     col_exp1, col_exp2 = st.columns(2)
 
     with col_exp1:
-        csv_bytes = df_res.to_csv(index=False).encode("utf-8")
+        csv_bytes = df_actif.to_csv(index=False).encode("utf-8")
         st.download_button(
             "📥 Télécharger le tableau synthétique (CSV)", data=csv_bytes,
             file_name="synthese_indicateurs_electromecaniques.csv", mime="text/csv",
@@ -1242,7 +1271,7 @@ if uploaded_file is not None:
     with col_exp2:
         if HAS_REPORTLAB:
             try:
-                pdf_bytes = generer_pdf_rapport_complet(df_res, resultats, metrique_maitresse, unite_amplitude)
+                pdf_bytes = generer_pdf_rapport_complet(df_actif, resultats_actifs, metrique_maitresse, unite_amplitude)
                 st.download_button(
                     "📄 Télécharger le Rapport Global Complet (PDF)", data=pdf_bytes,
                     file_name="rapport_global_diagnostic_parc.pdf", mime="application/pdf",
@@ -1251,7 +1280,7 @@ if uploaded_file is not None:
             except Exception as e:
                 st.warning(f"Erreur de génération PDF : {e}")
         else:
-            html_content = generer_html_rapport_complet(df_res, resultats, metrique_maitresse, unite_amplitude)
+            html_content = generer_html_rapport_complet(df_actif, resultats_actifs, metrique_maitresse, unite_amplitude)
             st.download_button(
                 "📄 Télécharger le Rapport Global Complet (HTML / Imprimable PDF)",
                 data=html_content.encode("utf-8"),
