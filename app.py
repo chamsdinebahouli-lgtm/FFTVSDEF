@@ -26,7 +26,7 @@ import plotly.express as px
 import streamlit as st
 from scipy.fft import rfft, rfftfreq
 from scipy.signal import find_peaks
-from scipy.stats import kurtosis, skew
+from scipy.stats import kurtosis, rankdata, skew
 
 # Importation optionnelle de ReportLab pour les PDF professionnels
 try:
@@ -227,6 +227,74 @@ def calculer_metriques_avancees(signal: np.ndarray, resultat_fft: ResultatFFT) -
     except Exception as e:
         logger.error(f"Erreur lors du calcul des métriques avancées : {e}")
         return metriques_par_defaut
+
+
+def calculer_spectre_correlation(
+    spectres: list[tuple[np.ndarray, np.ndarray]],
+    defectivite: np.ndarray,
+    freq_min: float,
+    freq_max: float,
+    n_points: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Calcule un "spectre de corrélation" : pour une grille fine de fréquences,
+    corrèle (Pearson et Spearman) l'amplitude spectrale interpolée de chaque
+    machine à cette fréquence avec son niveau de défectivité déclaré.
+
+    Chaque machine ayant potentiellement un dt et un nombre de points
+    différents, sa FFT vit sur sa propre grille fréquentielle. On interpole
+    donc chaque spectre individuel sur une grille commune (np.interp) avant
+    de corréler colonne par colonne à travers les machines. C'est une
+    interpolation linéaire simple : elle ne "invente" pas de résolution
+    fréquentielle supplémentaire, elle sert uniquement à comparer les
+    machines à une fréquence commune.
+
+    ATTENTION - risque de comparaisons multiples : corréler un grand nombre
+    de fréquences candidates augmente mécaniquement la probabilité de
+    trouver une corrélation élevée par pur hasard, même sans lien réel avec
+    la mécanique. Les pics de ce spectre de corrélation sont des PISTES à
+    vérifier (cohérence avec la cinématique connue, robustesse Pearson vs
+    Spearman, stabilité si on ajoute des machines), pas des fréquences
+    cinématiques confirmées.
+
+    Args:
+        spectres: liste de tuples (freq, amplitude) par machine, dans le
+            MÊME ORDRE que `defectivite`.
+        defectivite: vecteur des niveaux de défectivité, aligné avec
+            `spectres`.
+        freq_min, freq_max: bornes de la grille commune. `freq_max` doit
+            rester inférieur ou égal à la fréquence de Nyquist de la machine
+            la plus limitante, sous peine d'extrapolation trompeuse
+            (np.interp prolonge en plateau au-delà des bornes du spectre
+            source).
+        n_points: nombre de points de la grille (résolution de l'analyse).
+
+    Returns:
+        (freq_grid, pearson_arr, spearman_arr)
+    """
+    freq_grid = np.linspace(freq_min, freq_max, n_points)
+    n_machines = len(spectres)
+    matrice_amp = np.zeros((n_machines, n_points))
+
+    for i, (freq_m, amp_m) in enumerate(spectres):
+        matrice_amp[i, :] = np.interp(freq_grid, freq_m, amp_m)
+
+    def _pearson_par_colonne(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        x_centre = x - x.mean(axis=0, keepdims=True)
+        y_centre = y - y.mean()
+        numerateur = (x_centre * y_centre[:, None]).sum(axis=0)
+        denominateur = np.sqrt((x_centre**2).sum(axis=0)) * np.sqrt((y_centre**2).sum())
+        with np.errstate(divide="ignore", invalid="ignore"):
+            r = np.where(denominateur > 1e-12, numerateur / denominateur, 0.0)
+        return r
+
+    pearson_arr = _pearson_par_colonne(matrice_amp, defectivite)
+
+    rangs_amp = np.apply_along_axis(rankdata, 0, matrice_amp)
+    rangs_defect = rankdata(defectivite)
+    spearman_arr = _pearson_par_colonne(rangs_amp, rangs_defect)
+
+    return freq_grid, pearson_arr, spearman_arr
 
 
 def extraire_amplitude(
@@ -1254,6 +1322,204 @@ if uploaded_file is not None:
                     )
                 st.plotly_chart(fig_spectre, use_container_width=True)
                 st.caption("Lignes verticales grises : les 4 fréquences cibles suivies par ailleurs, pour repère visuel.")
+
+        st.markdown("---")
+        st.markdown("#### 🧭 Fréquences corrélées à la défectivité (toutes les machines actives)")
+        st.caption(
+            "Contrairement à l'analyse ci-dessus (un système à la fois), ce bloc "
+            "compare TOUTES les machines actives entre elles : pour chaque "
+            "fréquence d'une grille fine, il corrèle l'amplitude spectrale à "
+            "cette fréquence (à travers les machines) avec le niveau de "
+            "défectivité que tu as saisi. Un pic de corrélation à une fréquence "
+            "donnée est une piste pour identifier une fréquence cinématique liée "
+            "à ton défaut — à confirmer mécaniquement, pas une conclusion en soi."
+        )
+
+        if df_actif["Niveau de défectivité"].nunique() <= 1:
+            st.info(
+                "Renseigne des niveaux de défectivité différents d'au moins deux "
+                "machines actives (colonne éditable du tableau principal) pour "
+                "activer cette recherche."
+            )
+        elif len(resultats_actifs) < 4:
+            st.info(
+                "Cette recherche a besoin d'un minimum de machines actives pour "
+                "être exploitable (idéalement une dizaine ou plus). Avec moins "
+                "de 4, les corrélations trouvées seraient trop instables pour "
+                "être interprétées, même à titre de piste."
+            )
+        else:
+            st.warning(
+                "⚠️ **Risque de comparaisons multiples** : cette recherche teste "
+                "de nombreuses fréquences candidates. Avec suffisamment de "
+                "fréquences testées, une corrélation élevée apparaît presque "
+                "toujours par pur hasard, même sans lien mécanique réel. Traite "
+                "les résultats ci-dessous comme des **pistes à vérifier** "
+                "(cohérence Pearson/Spearman, cohérence avec la cinématique "
+                "connue de ta machine, stabilité si tu ajoutes des machines au "
+                "lot) — pas comme des fréquences cinématiques confirmées."
+            )
+
+            noms_actifs = df_actif["Système / Machine"].tolist()
+            resultats_par_nom = {r["nom"]: r for r in resultats_actifs}
+            cle_spectre = "spectre_amplitude_pct_dc" if normaliser_dc else "spectre_amplitude_v"
+            spectres_ordonnes = [
+                (resultats_par_nom[nom]["spectre_freq"], resultats_par_nom[nom][cle_spectre])
+                for nom in noms_actifs
+            ]
+            defectivite_ordonnee = df_actif["Niveau de défectivité"].to_numpy(dtype=float)
+
+            freq_max_commune = min(float(freq_m.max()) for freq_m, _ in spectres_ordonnes)
+            resolution_min_active = min(r["resolution_hz"] for r in resultats_actifs)
+
+            col_min, col_max, col_grille = st.columns(3)
+            with col_min:
+                freq_min_recherche = st.number_input(
+                    "Fréquence min. de la recherche (Hz)",
+                    min_value=0.0, value=round(resolution_min_active * 2, 5), step=0.01, format="%.5f",
+                    help="Écarté de 0 Hz pour éviter les artefacts près de la "
+                    "composante continue (déjà retirée du signal).",
+                )
+            with col_max:
+                freq_max_recherche = st.number_input(
+                    "Fréquence max. de la recherche (Hz)",
+                    min_value=freq_min_recherche, max_value=freq_max_commune,
+                    value=freq_max_commune, step=0.1,
+                    help="Plafonnée à la fréquence de Nyquist commune la plus basse "
+                    "du lot actif, pour éviter d'extrapoler au-delà du spectre "
+                    "d'une machine.",
+                )
+            with col_grille:
+                n_points_grille = st.number_input(
+                    "Résolution de la grille (nb de points)",
+                    min_value=100, max_value=5000, value=1500, step=100,
+                    help="Plus de points = analyse plus fine mais plus lente, et "
+                    "risque de comparaisons multiples encore plus élevé.",
+                )
+
+            freq_grid, pearson_arr, spearman_arr = calculer_spectre_correlation(
+                spectres_ordonnes, defectivite_ordonnee,
+                freq_min_recherche, freq_max_recherche, int(n_points_grille),
+            )
+
+            col_seuil3, col_dist3, col_top = st.columns(3)
+            with col_seuil3:
+                seuil_corr_min = st.slider(
+                    "Corrélation Pearson minimale |r| à retenir",
+                    min_value=0.0, max_value=1.0, value=0.5, step=0.05,
+                )
+            with col_dist3:
+                separation_min_hz3 = st.number_input(
+                    "Séparation minimale entre 2 candidats (Hz)",
+                    min_value=0.0, value=max(resolution_min_active * 3, 0.01), step=0.01,
+                )
+            with col_top:
+                nb_max_candidats = st.number_input(
+                    "Nombre max. de candidats affichés", min_value=1, max_value=50, value=10, step=1,
+                )
+
+            pas_grille = freq_grid[1] - freq_grid[0] if len(freq_grid) > 1 else 1.0
+            distance_grille = max(1, int(round(separation_min_hz3 / pas_grille)))
+            indices_candidats, _ = find_peaks(
+                np.abs(pearson_arr), height=seuil_corr_min, distance=distance_grille
+            )
+
+            fig_corr_spectre = px.line(
+                x=freq_grid, y=pearson_arr,
+                labels={"x": "Fréquence (Hz)", "y": "Corrélation Pearson"},
+                title="Spectre de corrélation (amplitude spectrale vs niveau de défectivité)",
+            )
+            fig_corr_spectre.data[0].name = "Pearson"
+            fig_corr_spectre.data[0].showlegend = True
+            fig_corr_spectre.add_scatter(
+                x=freq_grid, y=spearman_arr, mode="lines", name="Spearman",
+                line=dict(dash="dot"),
+            )
+            fig_corr_spectre.add_hline(y=0, line_color="gray", opacity=0.4)
+            fig_corr_spectre.add_hline(y=seuil_corr_min, line_dash="dash", line_color="red", opacity=0.5)
+            fig_corr_spectre.add_hline(y=-seuil_corr_min, line_dash="dash", line_color="red", opacity=0.5)
+            for _, ligne_cible in pd.DataFrame(
+                {"nom": list(FREQS_TOUTES.keys()), "freq": list(FREQS_TOUTES.values())}
+            ).iterrows():
+                if freq_min_recherche <= ligne_cible["freq"] <= freq_max_recherche:
+                    fig_corr_spectre.add_vline(
+                        x=ligne_cible["freq"], line_dash="dot", line_color="gray", opacity=0.3,
+                    )
+
+            if len(indices_candidats) > 0:
+                fig_corr_spectre.add_scatter(
+                    x=freq_grid[indices_candidats], y=pearson_arr[indices_candidats],
+                    mode="markers", marker=dict(color="red", size=9, symbol="x"),
+                    name="Candidats détectés",
+                )
+
+            st.plotly_chart(fig_corr_spectre, use_container_width=True)
+            st.caption(
+                "Lignes pointillées rouges : seuil de corrélation retenu (± "
+                f"{seuil_corr_min:.2f}). Lignes grises : les fréquences déjà "
+                "suivies, pour repère visuel."
+            )
+
+            if len(indices_candidats) == 0:
+                st.info(
+                    "Aucune fréquence ne dépasse le seuil de corrélation retenu. "
+                    "Baisse le seuil si besoin, ou élargis la plage analysée."
+                )
+            else:
+                lignes_candidats = []
+                for idx in indices_candidats:
+                    f_val = float(freq_grid[idx])
+                    p_val = float(pearson_arr[idx])
+                    s_val = float(spearman_arr[idx])
+                    nom_proche, ecart = identifier_frequence_cible_proche(f_val, FREQS_TOUTES)
+                    correspondance = (
+                        f"≈ {nom_proche} (écart {ecart * 100:.1f}%)" if nom_proche else "Aucune fréquence suivie proche"
+                    )
+                    accord_signe = "✅ cohérent" if (p_val * s_val) > 0 else "⚠️ signes divergents"
+                    lignes_candidats.append({
+                        "Fréquence (Hz)": round(f_val, 5),
+                        "Pearson": round(p_val, 3),
+                        "Spearman": round(s_val, 3),
+                        "Pearson vs Spearman": accord_signe,
+                        "Correspondance": correspondance,
+                    })
+
+                df_candidats = pd.DataFrame(lignes_candidats).sort_values(
+                    by="Pearson", key=lambda s: s.abs(), ascending=False
+                ).head(int(nb_max_candidats)).reset_index(drop=True)
+
+                st.dataframe(df_candidats, use_container_width=True, hide_index=True)
+                st.caption(
+                    "💡 'Pearson vs Spearman' signale si les deux méthodes vont "
+                    "dans le même sens : un désaccord de signe est un signal "
+                    "d'instabilité (relation non-monotone, bruit, ou effet d'une "
+                    "seule machine atypique) et invite à plus de prudence encore "
+                    "sur ce candidat."
+                )
+
+                st.markdown("##### Ajouter un candidat au suivi permanent")
+                col_choix2, col_nom2, col_bouton2 = st.columns([2, 2, 1])
+                with col_choix2:
+                    freq_candidat_a_ajouter = st.selectbox(
+                        "Candidat à ajouter :",
+                        options=df_candidats["Fréquence (Hz)"].tolist(),
+                        key="select_candidat_a_ajouter",
+                    )
+                with col_nom2:
+                    nom_candidat_a_ajouter = st.text_input(
+                        "Nom à lui donner :",
+                        value=f"Corr {freq_candidat_a_ajouter:.3f} Hz",
+                        key="nom_candidat_a_ajouter",
+                    )
+                with col_bouton2:
+                    st.write("")
+                    st.write("")
+                    if st.button("➕ Ajouter", key="bouton_ajout_candidat_correlation"):
+                        if nom_candidat_a_ajouter in FREQS_TOUTES:
+                            st.warning("Ce nom existe déjà, choisis-en un autre.")
+                        else:
+                            st.session_state["freqs_perso"][nom_candidat_a_ajouter] = float(freq_candidat_a_ajouter)
+                            st.rerun()
 
     st.markdown("---")
     st.subheader("📥 Exportation des Résultats & Rapports Complets")
