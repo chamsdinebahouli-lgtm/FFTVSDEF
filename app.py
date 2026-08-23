@@ -1137,10 +1137,26 @@ if uploaded_file is not None:
         st.markdown("#### Amplitudes spectrales par machine (Empilées)")
         st.caption("Empilement à but de lecture visuelle : la hauteur cumulée n'est pas un indicateur de sévérité globale.")
         if not df_melted.empty:
+            # Tri propre à ce graphique : par somme des amplitudes EMPILÉES
+            # affichées ici, pas par l'indicateur principal sélectionné pour
+            # le classement global (tab1). Sans ça, l'ordre de "tri" affiché
+            # ici ne correspondrait pas à la hauteur réelle des barres.
+            ordre_systemes_stack = (
+                df_melted.groupby("Système / Machine")[f"Amplitude ({unite_amplitude})"]
+                .sum()
+                .sort_values(ascending=ascending_flag)
+                .index.tolist()
+            )
+            st.caption(
+                f"Tri appliqué selon la somme des amplitudes empilées "
+                f"ci-dessous ({sens_tri.lower()}) — indépendant de "
+                f"l'indicateur principal ('{metrique_maitresse}') sélectionné "
+                "pour le classement global."
+            )
             fig_stacked = px.bar(
                 df_melted, x="Système / Machine", y=f"Amplitude ({unite_amplitude})",
                 color="Composante / Fréquence Cible", title="Contribution des Fréquences Cibles",
-                barmode="stack", category_orders={"Système / Machine": ordre_systemes},
+                barmode="stack", category_orders={"Système / Machine": ordre_systemes_stack},
             )
             st.plotly_chart(fig_stacked, use_container_width=True)
         else:
