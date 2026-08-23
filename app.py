@@ -1251,27 +1251,68 @@ if uploaded_file is not None:
                 st.plotly_chart(fig_corr, use_container_width=True)
 
                 st.markdown("##### Nuage de points — inspection détaillée d'un indicateur")
+                st.caption(
+                    "Deux vues du même indicateur : à gauche les valeurs brutes "
+                    "avec la droite de régression linéaire (ce que mesure "
+                    "Pearson) ; à droite les mêmes points transformés en rangs "
+                    "(ce que mesure Spearman — un Spearman élevé avec un Pearson "
+                    "faible signale une relation monotone mais non-linéaire, ou "
+                    "sensible à un point atypique sur la vue de gauche)."
+                )
                 indicateur_focus = st.selectbox(
                     "Indicateur à inspecter :", options=df_corr["Indicateur"].tolist(),
                 )
-                try:
-                    fig_scatter = px.scatter(
-                        df_actif, x="Niveau de défectivité", y=indicateur_focus,
-                        text="Système / Machine", title=f"{indicateur_focus} vs Niveau de défectivité",
-                        trendline="ols",
-                    )
-                except Exception:
-                    # Repli si statsmodels n'est pas installé (trendline indisponible)
-                    fig_scatter = px.scatter(
-                        df_actif, x="Niveau de défectivité", y=indicateur_focus,
-                        text="Système / Machine", title=f"{indicateur_focus} vs Niveau de défectivité",
-                    )
-                fig_scatter.update_traces(textposition="top center")
-                st.plotly_chart(fig_scatter, use_container_width=True)
+                pearson_focus = float(pearson_s.get(indicateur_focus, float("nan")))
+                spearman_focus = float(spearman_s.get(indicateur_focus, float("nan")))
+
+                col_scatter_brut, col_scatter_rangs = st.columns(2)
+
+                with col_scatter_brut:
+                    try:
+                        fig_scatter = px.scatter(
+                            df_actif, x="Niveau de défectivité", y=indicateur_focus,
+                            text="Système / Machine",
+                            title=f"Valeurs brutes (Pearson = {pearson_focus:.3f})",
+                            trendline="ols",
+                        )
+                    except Exception:
+                        # Repli si statsmodels n'est pas installé (trendline indisponible)
+                        fig_scatter = px.scatter(
+                            df_actif, x="Niveau de défectivité", y=indicateur_focus,
+                            text="Système / Machine",
+                            title=f"Valeurs brutes (Pearson = {pearson_focus:.3f})",
+                        )
+                    fig_scatter.update_traces(textposition="top center")
+                    st.plotly_chart(fig_scatter, use_container_width=True)
+
+                with col_scatter_rangs:
+                    df_rangs = pd.DataFrame({
+                        "Système / Machine": df_actif["Système / Machine"],
+                        "Rang - Niveau de défectivité": rankdata(df_actif["Niveau de défectivité"]),
+                        f"Rang - {indicateur_focus}": rankdata(df_actif[indicateur_focus]),
+                    })
+                    try:
+                        fig_scatter_rangs = px.scatter(
+                            df_rangs, x="Rang - Niveau de défectivité", y=f"Rang - {indicateur_focus}",
+                            text="Système / Machine",
+                            title=f"Rangs (Spearman = {spearman_focus:.3f})",
+                            trendline="ols",
+                        )
+                    except Exception:
+                        fig_scatter_rangs = px.scatter(
+                            df_rangs, x="Rang - Niveau de défectivité", y=f"Rang - {indicateur_focus}",
+                            text="Système / Machine",
+                            title=f"Rangs (Spearman = {spearman_focus:.3f})",
+                        )
+                    fig_scatter_rangs.update_traces(textposition="top center")
+                    st.plotly_chart(fig_scatter_rangs, use_container_width=True)
 
                 st.caption(
-                    "La droite de tendance (régression linéaire) est indicative : "
-                    "avec peu de machines, ne pas sur-interpréter sa pente."
+                    "Les droites de tendance sont indicatives : avec peu de "
+                    "machines, ne pas sur-interpréter leur pente. Un point isolé "
+                    "très éloigné des autres peut à lui seul faire varier "
+                    "fortement Pearson (vue de gauche) sans changer Spearman "
+                    "(vue de droite, moins sensible aux valeurs extrêmes)."
                 )
 
     with tab5:
