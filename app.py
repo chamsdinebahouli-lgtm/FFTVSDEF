@@ -297,6 +297,83 @@ def calculer_spectre_correlation(
     return freq_grid, pearson_arr, spearman_arr
 
 
+def pic_local_present(
+    freq_m: np.ndarray,
+    amp_m: np.ndarray,
+    f_cible: float,
+    tolerance_hz: float,
+    facteur_proeminence: float = 3.0,
+    largeur_fenetre_hz: float | None = None,
+) -> bool:
+    """
+    Vérifie si le spectre BRUT d'une machine présente un pic local net à
+    proximité de f_cible — par opposition à une simple valeur interpolée
+    plus élevée que la moyenne, qui peut n'être qu'une variation de bruit de
+    fond sans vrai pic spectral.
+
+    Méthode : on estime le "bruit local" (médiane de l'amplitude) sur une
+    fenêtre large autour de f_cible, puis on vérifie que le maximum
+    d'amplitude dans une fenêtre étroite (± tolerance_hz) dépasse ce bruit
+    local d'un facteur donné (facteur_proeminence). C'est volontairement
+    simple (pas une détection de pic normée) : le but est de filtrer les
+    candidats "portés uniquement par du bruit corrélé", pas de remplacer
+    l'onglet de détection de pics par machine.
+
+    Args:
+        freq_m, amp_m: spectre BRUT (non interpolé) d'une machine.
+        f_cible: fréquence candidate à vérifier.
+        tolerance_hz: demi-largeur de la fenêtre où chercher le pic.
+        facteur_proeminence: multiplicateur du bruit local que le pic doit
+            dépasser pour être considéré comme "net".
+        largeur_fenetre_hz: demi-largeur de la fenêtre d'estimation du bruit
+            de fond. Par défaut, 4x la tolérance de recherche du pic.
+    """
+    if largeur_fenetre_hz is None:
+        largeur_fenetre_hz = tolerance_hz * 4
+
+    mask_fenetre = (freq_m >= f_cible - largeur_fenetre_hz) & (freq_m <= f_cible + largeur_fenetre_hz)
+    if not np.any(mask_fenetre):
+        return False
+
+    amp_fenetre = amp_m[mask_fenetre]
+    freq_fenetre = freq_m[mask_fenetre]
+    bruit_local = float(np.median(amp_fenetre))
+
+    mask_proche = (freq_fenetre >= f_cible - tolerance_hz) & (freq_fenetre <= f_cible + tolerance_hz)
+    if not np.any(mask_proche):
+        return False
+    amp_proche_max = float(np.max(amp_fenetre[mask_proche]))
+
+    if bruit_local < 1e-12:
+        # Pas de bruit de fond mesurable sur la fenêtre : on retombe sur un
+        # simple test de présence d'amplitude non nulle.
+        return amp_proche_max > 1e-9
+
+    return amp_proche_max >= facteur_proeminence * bruit_local
+
+
+def proportion_machines_avec_pic(
+    spectres: list[tuple[np.ndarray, np.ndarray]],
+    f_cible: float,
+    tolerance_hz: float,
+    facteur_proeminence: float = 3.0,
+) -> float:
+    """
+    Pourcentage de machines (parmi `spectres`) présentant un pic local net à
+    f_cible dans leur spectre BRUT. Sert à distinguer une fréquence
+    corrélée à la défectivité parce qu'un vrai phénomène spectral s'y
+    produit sur la majorité du parc, d'une fréquence corrélée uniquement
+    par un artefact de bruit ou par une seule machine atypique.
+    """
+    if not spectres:
+        return 0.0
+    presences = [
+        pic_local_present(freq_m, amp_m, f_cible, tolerance_hz, facteur_proeminence)
+        for freq_m, amp_m in spectres
+    ]
+    return float(np.mean(presences)) * 100.0
+
+
 def extraire_amplitude(
     resultat: ResultatFFT,
     freq_cible: float,
@@ -1418,6 +1495,42 @@ if uploaded_file is not None:
                     "Nombre max. de candidats affichés", min_value=1, max_value=50, value=10, step=1,
                 )
 
+            st.caption(
+                "🔬 **Vérification de présence physique** : une fréquence peut "
+                "corréler avec la défectivité juste parce que le bruit de fond "
+                "y varie de façon cohérente, sans qu'un vrai pic spectral y "
+                "existe sur les machines. Les réglages ci-dessous vérifient, "
+                "pour chaque candidat, sur quelle proportion des machines "
+                "actives un pic net est réellement présent dans leur spectre "
+                "brut (pas juste une valeur interpolée plus haute que la "
+                "moyenne)."
+            )
+            col_tol, col_prom, col_presence = st.columns(3)
+            with col_tol:
+                tolerance_pic_hz = st.number_input(
+                    "Tolérance de recherche du pic (Hz)",
+                    min_value=0.0, value=max(resolution_min_active * 2, 0.02), step=0.01,
+                    help="Demi-largeur de la fenêtre, autour de chaque fréquence "
+                    "candidate, où l'on cherche un pic sur le spectre brut de "
+                    "chaque machine.",
+                )
+            with col_prom:
+                facteur_proeminence = st.slider(
+                    "Proéminence minimale requise (x bruit local)",
+                    min_value=1.5, max_value=10.0, value=3.0, step=0.5,
+                    help="Le pic doit dépasser d'au moins ce facteur la médiane "
+                    "d'amplitude locale pour être compté comme un vrai pic, pas "
+                    "juste du bruit.",
+                )
+            with col_presence:
+                seuil_presence_min = st.slider(
+                    "Filtrer : présence minimale requise (%)",
+                    min_value=0, max_value=100, value=40, step=5,
+                    help="N'affiche que les candidats visibles sur au moins ce "
+                    "pourcentage des machines actives — écarte les candidats "
+                    "portés par du bruit ou par une seule machine atypique.",
+                )
+
             pas_grille = freq_grid[1] - freq_grid[0] if len(freq_grid) > 1 else 1.0
             distance_grille = max(1, int(round(separation_min_hz3 / pas_grille)))
             indices_candidats, _ = find_peaks(
@@ -1476,50 +1589,79 @@ if uploaded_file is not None:
                         f"≈ {nom_proche} (écart {ecart * 100:.1f}%)" if nom_proche else "Aucune fréquence suivie proche"
                     )
                     accord_signe = "✅ cohérent" if (p_val * s_val) > 0 else "⚠️ signes divergents"
+                    pourcentage_presence = proportion_machines_avec_pic(
+                        spectres_ordonnes, f_val, tolerance_pic_hz, facteur_proeminence
+                    )
                     lignes_candidats.append({
                         "Fréquence (Hz)": round(f_val, 5),
                         "Pearson": round(p_val, 3),
                         "Spearman": round(s_val, 3),
                         "Pearson vs Spearman": accord_signe,
+                        "Machines avec pic net (%)": round(pourcentage_presence, 1),
                         "Correspondance": correspondance,
                     })
 
-                df_candidats = pd.DataFrame(lignes_candidats).sort_values(
+                df_candidats_complet = pd.DataFrame(lignes_candidats).sort_values(
                     by="Pearson", key=lambda s: s.abs(), ascending=False
-                ).head(int(nb_max_candidats)).reset_index(drop=True)
+                ).reset_index(drop=True)
 
-                st.dataframe(df_candidats, use_container_width=True, hide_index=True)
-                st.caption(
-                    "💡 'Pearson vs Spearman' signale si les deux méthodes vont "
-                    "dans le même sens : un désaccord de signe est un signal "
-                    "d'instabilité (relation non-monotone, bruit, ou effet d'une "
-                    "seule machine atypique) et invite à plus de prudence encore "
-                    "sur ce candidat."
-                )
+                df_candidats = df_candidats_complet[
+                    df_candidats_complet["Machines avec pic net (%)"] >= seuil_presence_min
+                ].head(int(nb_max_candidats)).reset_index(drop=True)
 
-                st.markdown("##### Ajouter un candidat au suivi permanent")
-                col_choix2, col_nom2, col_bouton2 = st.columns([2, 2, 1])
-                with col_choix2:
-                    freq_candidat_a_ajouter = st.selectbox(
-                        "Candidat à ajouter :",
-                        options=df_candidats["Fréquence (Hz)"].tolist(),
-                        key="select_candidat_a_ajouter",
+                n_ecartes = len(df_candidats_complet) - len(df_candidats_complet[
+                    df_candidats_complet["Machines avec pic net (%)"] >= seuil_presence_min
+                ])
+                if n_ecartes > 0:
+                    st.caption(
+                        f"🚫 {n_ecartes} candidat(s) écarté(s) car le pic n'est pas "
+                        f"assez présent sur le parc (< {seuil_presence_min}% des "
+                        "machines actives). Baisse le seuil de présence minimale "
+                        "ci-dessus pour les revoir."
                     )
-                with col_nom2:
-                    nom_candidat_a_ajouter = st.text_input(
-                        "Nom à lui donner :",
-                        value=f"Corr {freq_candidat_a_ajouter:.3f} Hz",
-                        key="nom_candidat_a_ajouter",
+
+                if df_candidats.empty:
+                    st.info(
+                        "Aucun candidat ne passe le filtre de présence physique "
+                        "actuel. Baisse le seuil de présence minimale, ou la "
+                        "proéminence requise, pour être moins strict."
                     )
-                with col_bouton2:
-                    st.write("")
-                    st.write("")
-                    if st.button("➕ Ajouter", key="bouton_ajout_candidat_correlation"):
-                        if nom_candidat_a_ajouter in FREQS_TOUTES:
-                            st.warning("Ce nom existe déjà, choisis-en un autre.")
-                        else:
-                            st.session_state["freqs_perso"][nom_candidat_a_ajouter] = float(freq_candidat_a_ajouter)
-                            st.rerun()
+                else:
+                    st.dataframe(df_candidats, use_container_width=True, hide_index=True)
+                    st.caption(
+                        "💡 'Pearson vs Spearman' signale si les deux méthodes "
+                        "vont dans le même sens : un désaccord de signe est un "
+                        "signal d'instabilité (relation non-monotone, bruit, ou "
+                        "effet d'une seule machine atypique). 'Machines avec pic "
+                        "net (%)' indique sur quelle proportion du parc actif un "
+                        "vrai pic spectral est visible à cette fréquence, à "
+                        "distinguer d'une corrélation portée uniquement par du "
+                        "bruit de fond."
+                    )
+
+                    st.markdown("##### Ajouter un candidat au suivi permanent")
+                    col_choix2, col_nom2, col_bouton2 = st.columns([2, 2, 1])
+                    with col_choix2:
+                        freq_candidat_a_ajouter = st.selectbox(
+                            "Candidat à ajouter :",
+                            options=df_candidats["Fréquence (Hz)"].tolist(),
+                            key="select_candidat_a_ajouter",
+                        )
+                    with col_nom2:
+                        nom_candidat_a_ajouter = st.text_input(
+                            "Nom à lui donner :",
+                            value=f"Corr {freq_candidat_a_ajouter:.3f} Hz",
+                            key="nom_candidat_a_ajouter",
+                        )
+                    with col_bouton2:
+                        st.write("")
+                        st.write("")
+                        if st.button("➕ Ajouter", key="bouton_ajout_candidat_correlation"):
+                            if nom_candidat_a_ajouter in FREQS_TOUTES:
+                                st.warning("Ce nom existe déjà, choisis-en un autre.")
+                            else:
+                                st.session_state["freqs_perso"][nom_candidat_a_ajouter] = float(freq_candidat_a_ajouter)
+                                st.rerun()
 
     st.markdown("---")
     st.subheader("📥 Exportation des Résultats & Rapports Complets")
